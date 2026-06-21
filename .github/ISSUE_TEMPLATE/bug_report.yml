@@ -1,0 +1,56 @@
+name: Bug report
+description: Report a problem with the Overwatch site agent
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug. **Do not report security issues here** — see
+        [SECURITY.md](https://github.com/DorwardTech/Overwatch2-Agent/blob/main/SECURITY.md).
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: A clear description of the problem and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Configure ...
+        2. Start the agent ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Agent version / image tag or commit
+      placeholder: "ghcr.io/dorwardtech/overwatch2-agent:latest"
+    validations:
+      required: true
+  - type: checkboxes
+    id: features
+    attributes:
+      label: Enabled features
+      description: Which optional features were turned on?
+      options:
+        - label: Telemetry only (defaults)
+        - label: Game results (ENABLE_GAME_RESULTS)
+        - label: Cache (ENABLE_CACHE)
+        - label: Proxy (ENABLE_PROXY)
+        - label: Message bus (ENABLE_MSG_BUS)
+        - label: Admin API (ADMIN_API_ADDR)
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Paste agent logs. **Redact any tokens or secrets.**
+      render: shell
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Docker version, how the agent is deployed, O-Zone version if relevant.

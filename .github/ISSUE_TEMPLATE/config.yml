@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/DorwardTech/Overwatch2-Agent/security
+    about: Please report vulnerabilities privately via the Security tab — do not open a public issue. See SECURITY.md.
