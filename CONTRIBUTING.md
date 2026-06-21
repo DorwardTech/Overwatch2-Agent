@@ -32,9 +32,6 @@ go vet ./...
 go test ./...
 ```
 
-The repo ships an in-process fake O-Zone (`internal/ozonesim`) used by the tests,
-so the cache/proxy paths can be exercised without laser-tag hardware.
-
 ## Making changes
 
 - Keep pull requests **focused** — one logical change per PR.
