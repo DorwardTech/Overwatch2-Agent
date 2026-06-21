@@ -35,7 +35,7 @@ docker run -d --restart unless-stopped --name overwatch-agent \
   -e CENTRAL_API_URL=https://ow2.lasertag.net.au/api/agent/ingest \
   -e AGENT_TOKEN=OW2_xxx \
   -e OZONE_WS_HOST=192.168.1.50 \
-  ghcr.io/DorwardTech/overwatch-agent:latest
+  ghcr.io/dorwardtech/overwatch2-agent:latest
 ```
 
 The agent exits immediately if `CENTRAL_API_URL` or `AGENT_TOKEN` is missing.
