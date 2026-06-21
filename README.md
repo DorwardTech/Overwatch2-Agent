@@ -168,6 +168,20 @@ ENABLE_MSG_BUS=true
 PROXY_LISTEN_ADDR=0.0.0.0:12123
 ```
 
+> **Cache volume permissions.** The container runs as a non-root user (UID
+> `65532`), so `CACHE_DIR` must be writable by that user — otherwise the agent
+> logs `cache disabled: … permission denied` (and, since the proxy serves from
+> the cache, the proxy won't start either). A volume created from a recent image
+> inherits the right ownership automatically. For an **existing** volume or a
+> **bind mount**, chown it once:
+>
+> ```bash
+> # named volume (replace with your volume name from `docker volume ls`)
+> docker run --rm -v overwatch-agent_agent-cache:/data alpine chown -R 65532:65532 /data
+> # bind mount
+> sudo chown -R 65532:65532 /path/to/cache
+> ```
+
 ---
 
 ## Admin API
