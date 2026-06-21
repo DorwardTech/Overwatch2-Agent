@@ -13,6 +13,7 @@ package adminapi
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -77,10 +78,13 @@ func (s *Server) routes() http.Handler {
 	return s.auth(mux)
 }
 
-// auth enforces a bearer token on every route, in constant-ish time.
+// auth enforces a bearer token on every route. The token is compared in constant
+// time (crypto/subtle) so the check doesn't leak the secret via timing.
 func (s *Server) auth(next http.Handler) http.Handler {
+	expected := []byte("Bearer " + s.token)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer "+s.token {
+		got := []byte(r.Header.Get("Authorization"))
+		if subtle.ConstantTimeCompare(got, expected) != 1 {
 			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 			return
 		}

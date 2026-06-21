@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -249,6 +250,12 @@ func (a *App) collect(client *ozone.Client, slow bool) ([]byte, string, error) {
 		return nil, "", err
 	}
 	mode := toInt(server["SERVERMODE"])
+	// SERVERMODE is a small enum, but toInt yields a platform-width int; bound it
+	// against the int32 range before the atomic store so the conversion can't
+	// overflow (CodeQL go/incorrect-integer-conversion).
+	if mode < math.MinInt32 || mode > math.MaxInt32 {
+		mode = 0
+	}
 	a.serverMode.Store(int32(mode))
 	a.reconcileState(mode)
 	if a.cfg.ResultsEnabled {

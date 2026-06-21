@@ -134,9 +134,15 @@ func (c *Client) readFrame(timeout time.Duration) ([]byte, error) {
 }
 
 // frame builds the 5-byte header (little-endian length + 0x28 token) + JSON body.
+// Bodies are bounded by maxPayload, so the length fits the uint32 header field;
+// an over-size body (never expected) is capped defensively rather than overflowing.
 func frame(body []byte) []byte {
-	packet := make([]byte, 5+len(body))
-	binary.LittleEndian.PutUint32(packet[:4], uint32(len(body)))
+	if len(body) > maxPayload {
+		body = body[:maxPayload]
+	}
+	n := len(body) // 0 <= n <= maxPayload, so it fits in uint32
+	packet := make([]byte, 5+n)
+	binary.LittleEndian.PutUint32(packet[:4], uint32(n))
 	packet[4] = tokenByte
 	copy(packet[5:], body)
 	return packet
