@@ -247,3 +247,11 @@ internal/
   app/         main loop, game-state machine, idle-gating, graceful shutdown
 ```
 
+## License
+
+This source is **source-available, not open-source**: published for reference and
+transparency, with all rights reserved. See [LICENSE](LICENSE). Authorised
+operators may deploy and run the agent to connect to the Overwatch service under
+their agreement; for any other use, contact the maintainer.
+
+

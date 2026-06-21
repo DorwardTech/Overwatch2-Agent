@@ -57,7 +57,10 @@ so the cache/proxy paths can be exercised without laser-tag hardware.
 For substantial or cross-cutting changes, please open an issue first to discuss
 the approach with the maintainers.
 
-## Certificate of origin
+## Contributions & licensing
 
+This project is **source-available and proprietary** (see [LICENSE](LICENSE)).
 By submitting a contribution, you certify that you wrote it (or otherwise have
-the right to submit it) and that it may be included in this project.
+the right to submit it), and you grant the copyright holder a perpetual,
+irrevocable, worldwide right to use, modify, and distribute it as part of this
+project under the project's license.
