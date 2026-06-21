@@ -463,7 +463,7 @@ func (a *App) processCommands() {
 // server (and so must be blocked during active play).
 func isResultsCommand(t string) bool {
 	switch t {
-	case "refetch_game", "backfill_all", "resync_all":
+	case "refetch_game", "backfill_all", "resync_all", "cache_resync":
 		return true
 	}
 	return false
@@ -762,6 +762,32 @@ func (a *App) runCommand(c push.Command) (string, map[string]any) {
 	case "reboot_agent":
 		// The actual restart is handled after the ack so it isn't repeated.
 		return "acked", map[string]any{"rebooting": true}
+
+	case "agent_overview":
+		// Read-only status snapshot — identical to the admin API's /overview.
+		// Lets an operator reach the agent's admin view through central without
+		// any inbound path to the venue.
+		return "acked", a.Overview()
+
+	case "cache_resync":
+		// Idle-gated cache refresh — the admin API's /resync. Listed in
+		// isResultsCommand so central re-queues it until the server is idle
+		// rather than running it during a live game.
+		a.refreshCache()
+		n := 0
+		if a.store != nil {
+			n = a.store.Count()
+		}
+		return "acked", map[string]any{"games": n}
+
+	case "cache_purge":
+		// Drop every cached game — the admin API's /purge. Local filesystem
+		// only, so it never touches the print server and is safe any time.
+		n, err := a.Purge()
+		if err != nil {
+			return "failed", map[string]any{"error": err.Error()}
+		}
+		return "acked", map[string]any{"purged": n}
 
 	default:
 		return "failed", map[string]any{"error": "unsupported command type: " + c.Type}
