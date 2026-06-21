@@ -1,0 +1,43 @@
+{
+  "texts": {
+    "en": {
+      "acc": "Accuracy",
+      "ach": "Achievements",
+      "against": "Against",
+      "bd": "Base Destroys",
+      "ener": "Energised",
+      "for": "For",
+      "gr": "Game Rank",
+      "gs": "Game Score",
+      "iagc": "In a game called",
+      "ld": "Location / Device",
+      "lu": "Lives Used",
+      "ot": "On The",
+      "pa": "Played At",
+      "pf": "Pulses Fired",
+      "tbb": "Tagged By Bases",
+      "tbm": "Tagged By Mines",
+      "tgt": "Targets",
+      "toback": "Tags On Back",
+      "tobases": "Tags On Bases",
+      "tof": "Tags On Front",
+      "top": "Tags On Phasor",
+      "tos": "Tags On Shoulders",
+      "tpitgw": "Total Players in the game were",
+      "tr": "Team Rank",
+      "ts": "Team Score",
+      "xp": "Experience Points 111",
+      "yrst": "Your Stats",
+      "zltr": "Zone Laser Tag Report"
+    },
+    "ru": {
+      "llo": "Последний вход в систему 222",
+      "xp": "Очки опыта 222"
+    },
+    "zh": {
+      "llo": "上次登录",
+      "memb": "会员资格",
+      "xp": "经验值 333"
+    }
+  }
+}

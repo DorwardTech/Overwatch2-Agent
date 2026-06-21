@@ -1,0 +1,40 @@
+{
+  "teams": {
+    "0": {"rank": 1, "score": 50, "players": 1, "elim": 0, "colour": "#FF0000", "name": "RED"},
+    "2": {"rank": 2, "score": -1020, "players": 1, "elim": 0, "colour": "#00FF00", "name": "GREEN"}
+  },
+  "events": {
+    "3": {"time": 35, "evtyp": 28, "idf": 10, "score": -500, "tscore": -1020, "tidf": 2, "totscore": -1020},
+    "0": {"time": 6, "evtyp": 28, "idf": 10, "score": -500, "tscore": -500, "tidf": 2, "totscore": -500},
+    "1": {"wtyp": 0, "lev": 0, "ida": 10, "ttyp": 0, "evtyp": 0, "tida": 2, "score": 50, "heaf": 19, "time": 24, "idf": 1, "tscore": 50, "tidf": 0, "totscore": 50},
+    "2": {"wtyp": 0, "lev": 0, "ida": 1, "ttyp": 0, "evtyp": 14, "tida": 0, "score": -20, "heaf": 19, "time": 24, "idf": 10, "tscore": -520, "tidf": 2, "totscore": -520}
+  },
+  "game": {
+    "sid": 1201,
+    "gamename": "Competition Team Elimination",
+    "sitestring": ["u00e4", "ScoreSheet Line 2", "ScoreSheet Line 3", "ScoreSheet Line 4"],
+    "systype": 16,
+    "gamedur": 601,
+    "sbtype": "STANDARD_TEAM",
+    "gamenum": 9,
+    "date": "2020-02-18 16:06:05",
+    "gametype": 1
+  },
+  "players": {
+    "10": {"bdest": 0, "thits": 0, "tagsop": 0, "tagsby": 1, "term": 0, "shots": 1, "tagsbl": 0, "xp": 0, "health": 19, "acc": 0, "tagsof": 0, "tagsob": 0, "tagsbf": 0, "alias": "Krieger", "rank": 2, "tid": 2, "wterm": 0, "pow": 0, "tagsor": 0, "bhits": 0, "tagson": 0, "score": -1020, "omid": -1, "tagsbb": 0, "tagsbr": 0, "lang": "en", "elim": 0, "tagsol": 0, "colour": "#00FF00", "tagsbph": 1},
+    "1": {"bdest": 0, "thits": 0, "tagsop": 1, "tagsby": 0, "term": 0, "shots": 1, "tagsbl": 0, "xp": 5, "health": 20, "acc": 100, "tagsof": 0, "tagsob": 0, "tagsbf": 0, "alias": "Blade", "rank": 1, "tid": 0, "wterm": 0, "pow": 0, "tagsor": 0, "bhits": 0, "tagson": 1, "score": 50, "omid": -1, "tagsbb": 0, "tagsbr": 0, "lang": "en", "elim": 0, "tagsol": 0, "colour": "#FF0000", "tagsbph": 0}
+  },
+  "scores": {
+    "DEVICETAG_MINE": 0, "TARGETTAG_LEVEL_8": 0, "QTIME_QUESTIONTIMEOUT": 0, "DISRUPTORTAGGEDBYALLY": 0,
+    "PLAYERTAGGEDFOE_LEFT": 50, "TARGETTAG_LEVEL_9": 0, "TARGETTAG_LEVEL_7": 2000, "QTIME_CORRECTANSWER": 250,
+    "PLAYERHITFOEBASE": 0, "MISSILETAGGEDFOE": 500, "PLAYERTAGGEDALLY_WEAPON": -50, "PLAYERTAGGEDFOE_FRONT": 200,
+    "PLAYERTAGGEDALLY_BACK": -100, "DISRUPTEDTAGGEDALLY": -150, "REFEREE_TILT": 0, "MISSILETAGGEDBYFOE": -250,
+    "PLAYERTAGGEDALLY_RIGHT": -50, "QTIME_INCORRECTANSWER": 0, "DISRUPTEDTAGGEDBYALLY": 0, "PLAYERTAGGEDFOE_RIGHT": 50,
+    "DISRUPTORTAGGEDBYFOE": 0, "REFEREE_WARNING": 0, "PLAYERTAGGEDALLY_FRONT": -200, "DISRUPTORTAGGEDFOE": 300,
+    "TARGETTAG_LEVEL_0": 100, "TARGETTAG_LEVEL_3": 400, "TARGETTAG_LEVEL_4": 500, "TARGETTAG_LEVEL_6": 1000,
+    "DISRUPTEDTAGGEDBYFOE": 0, "MISSILETAGGEDALLY": -500, "PLAYERTAGGEDFOE_WEAPON": 50, "MISSILETAGGEDBYALLY": -250,
+    "DISRUPTEDTAGGEDFOE": 150, "PLAYERTAGGEDFOE_BACK": 100, "TARGETTAG_LEVEL_1": 200, "TARGETTAG_LEVEL_2": 300,
+    "DISRUPTORTAGGEDALLY": -300, "PLAYERDESTROYFOEBASE": 2001, "TARGETTAG_LEVEL_5": 750, "REFEREE_TERMINATION": -1000,
+    "PLAYERTAGGEDALLY_LEFT": -50
+  }
+}

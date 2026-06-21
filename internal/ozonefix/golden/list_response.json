@@ -1,0 +1,22 @@
+{
+  "gamelist": [
+    {
+      "duration": 24,
+      "endtime": "2019-10-10 15:47:36",
+      "gamename": "Solo",
+      "gamenum": 615,
+      "playercount": 2,
+      "starttime": "2019-10-10 15:47:12",
+      "valid": 1
+    },
+    {
+      "duration": 0,
+      "endtime": "None",
+      "gamename": "Team",
+      "gamenum": 614,
+      "playercount": 1,
+      "starttime": "2019-10-09 20:15:18",
+      "valid": 0
+    }
+  ]
+}

@@ -1,0 +1,46 @@
+# Overwatch site agent — plain Docker deployment for one venue.
+#
+#   cp .env.example .env      # fill in CENTRAL_API_URL, AGENT_TOKEN, OZONE_WS_HOST
+#   docker compose up -d      # build + run
+#
+# Or skip the build and pull the published image: comment out `build` and
+# uncomment `image` below.
+services:
+  agent:
+    build: .
+    # image: ghcr.io/OWNER/overwatch-agent:latest
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      HEALTH_ADDR: ':8088'
+      # The cache (when ENABLE_CACHE=true) writes here; backed by the volume
+      # below so it survives restarts despite the read-only root filesystem.
+      CACHE_DIR: /data/cache
+    # Publish the print-server proxy for TORN, only relevant when ENABLE_PROXY=true.
+    # Defaults to localhost (safe); set PROXY_PUBLISH_ADDR to this host's LAN IP
+    # (or 0.0.0.0) so TORN on another machine can reach it. NEVER expose it to the
+    # public internet — the proxy is unauthenticated, like O-Zone itself.
+    ports:
+      - '${PROXY_PUBLISH_ADDR:-127.0.0.1}:12123:12123'
+    volumes:
+      - agent-cache:/data/cache
+    # Lets the container reach an O-Zone server running on the Docker host via
+    # OZONE_WS_HOST=host.docker.internal (use the LAN IP instead if it's remote).
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+    healthcheck:
+      test: ['CMD', '/agent', 'healthcheck']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    read_only: true
+    deploy:
+      resources:
+        limits:
+          memory: 128m
+          cpus: '0.25'
+
+volumes:
+  # Persists the print-server cache across agent restarts/rebuilds.
+  agent-cache:
