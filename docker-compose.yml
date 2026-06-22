@@ -9,6 +9,8 @@ services:
   agent:
     build: .
     # image: ghcr.io/dorwardtech/overwatch2-agent:latest
+    # pull_policy: always   # with `image`, always re-pull :latest so you get the
+    #                       # right CPU arch (avoids a stale amd64 image on ARM)
     restart: unless-stopped
     env_file: .env
     environment:

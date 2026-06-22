@@ -31,6 +31,7 @@ Or run the prebuilt image directly (telemetry only):
 
 ```bash
 docker run -d --restart unless-stopped --name overwatch-agent \
+  --pull always \
   --add-host host.docker.internal:host-gateway \
   -e CENTRAL_API_URL=https://ow2.lasertag.net.au/api/agent/ingest \
   -e AGENT_TOKEN=OW2_xxx \
@@ -47,6 +48,14 @@ Everything else has a safe default; the cache/proxy/message-bus features are
 64-bit ARM boards (Raspberry Pi 3/4/5, ARM servers/VMs, Apple Silicon), and
 older 32-bit ARM. Docker pulls the right variant automatically; no per-arch tag
 needed.
+
+> **`exec /agent: exec format error`?** You have an old `:latest` cached from
+> before the image was multi-arch (an amd64 binary on an ARM host). Docker won't
+> re-pull a tag it already has, so force a fresh pull and recreate the container:
+> `docker pull ghcr.io/dorwardtech/overwatch2-agent:latest` (or run with
+> `--pull always`; with Compose, `docker compose pull`). Verify with
+> `docker image inspect … --format '{{.Architecture}}'` — it should match
+> `uname -m` (`aarch64`→`arm64`, `armv7l`→`arm/v7`).
 
 ---
 
