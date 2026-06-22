@@ -42,6 +42,12 @@ The agent exits immediately if `CENTRAL_API_URL` or `AGENT_TOKEN` is missing.
 Everything else has a safe default; the cache/proxy/message-bus features are
 **off** unless you turn them on.
 
+**Architectures.** The published image is multi-arch — `linux/amd64`,
+`linux/arm64`, and `linux/arm/v7` — so the same `:latest` tag runs on x86 hosts,
+64-bit ARM boards (Raspberry Pi 3/4/5, ARM servers/VMs, Apple Silicon), and
+older 32-bit ARM. Docker pulls the right variant automatically; no per-arch tag
+needed.
+
 ---
 
 ## Configuration

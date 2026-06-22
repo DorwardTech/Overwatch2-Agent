@@ -6,6 +6,12 @@ on:
     tags: ['v*']
   workflow_dispatch:
 
+# Architectures the released image is published for. amd64 for x86 hosts, arm64
+# for modern ARM (Raspberry Pi 3/4/5 64-bit, ARM servers), armv7 for older 32-bit
+# ARM boards.
+env:
+  PLATFORMS: linux/amd64,linux/arm64,linux/arm/v7
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -15,10 +21,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build (compile check)
+      # Multi-arch needs buildx. QEMU is NOT required: the Go build stage runs on
+      # the native runner ($BUILDPLATFORM) and cross-compiles, and the final
+      # distroless stage only copies the static binary (no target-arch RUN).
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build (compile check, all platforms)
         uses: docker/build-push-action@v6
         with:
           context: .
+          platforms: ${{ env.PLATFORMS }}
           push: false
 
       - name: Log in to GHCR
@@ -40,10 +53,14 @@ jobs:
             type=sha
             type=raw,value=latest,enable={{is_default_branch}}
 
-      - name: Build & push
+      - name: Build & push (multi-arch)
         uses: docker/build-push-action@v6
         with:
           context: .
+          platforms: ${{ env.PLATFORMS }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # Keep the manifest list clean (one entry per arch, no "unknown/unknown"
+          # provenance entries that confuse some ARM runtimes / imagetools).
+          provenance: false
