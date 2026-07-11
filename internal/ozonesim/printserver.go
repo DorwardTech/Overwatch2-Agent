@@ -1,10 +1,11 @@
-// Package ozonesim is a fake O-Zone used by the test suite. It speaks the real
-// Print Server TCP framing (port 12123) and the External Message Bus line
+// Package ozonesim is a fake O-Zone for tests and local demos. It speaks the
+// real Print Server TCP framing (port 12123) and the External Message Bus line
 // protocol (port 12111), serving golden fixtures so the agent's cache, proxy,
 // and idle-gating can be exercised without laser-tag hardware.
 //
-// The fake records connection and per-command counts so tests can assert, for
-// example, that the agent never contacts the print server during an active game.
+// It is the test/demo counterpart to docs/OZONE_PRINT_SERVER_API.md. The fake
+// records connection and per-command counts so tests can assert, for example,
+// that the agent never contacts the print server during an active game.
 package ozonesim
 
 import (
@@ -19,14 +20,24 @@ import (
 
 // PrintServer is a fake O-Zone Print Server (TCP, 0x28-framed JSON).
 type PrintServer struct {
-	mu       sync.Mutex
-	ln       net.Listener
-	listJSON []byte         // served for {"command":"list"}
-	games    map[int][]byte // gamenumber -> full "all" payload (verbatim)
-	banner   [][]byte       // frames pushed on connect (default: event_types, texts)
-	conns    int            // total connections accepted
-	requests map[string]int // command -> count
-	closed   bool
+	mu        sync.Mutex
+	ln        net.Listener
+	listJSON  []byte               // served for {"command":"list"}
+	games     map[int][]byte       // gamenumber -> full "all" payload (verbatim)
+	banner    [][]byte             // frames pushed on connect (default: event_types, texts)
+	conns     int                  // total connections accepted
+	requests  map[string]int       // command -> count
+	onRequest func(command string) // test hook, invoked per command (may be nil)
+	closed    bool
+}
+
+// OnRequest registers a hook invoked (synchronously) for each command received.
+// Tests use it to change agent state mid-batch, e.g. starting a game between
+// two fetches to assert the agent aborts.
+func (p *PrintServer) OnRequest(fn func(command string)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.onRequest = fn
 }
 
 // NewPrintServer seeds a coherent default: game #9 from the golden, a one-entry
@@ -187,7 +198,11 @@ func (p *PrintServer) respond(req map[string]any) (reply []byte, silent bool) {
 func (p *PrintServer) count(command string) {
 	p.mu.Lock()
 	p.requests[command]++
+	hook := p.onRequest
 	p.mu.Unlock()
+	if hook != nil {
+		hook(command)
+	}
 }
 
 func (p *PrintServer) gameResponse(req map[string]any, minimal bool) []byte {

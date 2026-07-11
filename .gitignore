@@ -1,0 +1,10 @@
+# Local env / secrets
+.env
+
+# Build artifacts
+/agent
+/out
+*.exe
+
+# Agent runtime data (cache, buffer)
+/data/

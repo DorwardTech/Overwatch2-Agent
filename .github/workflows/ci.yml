@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+jobs:
+  go:
+    name: Lint, vet, test & build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          check-latest: true
+
+      # The agent enforces the never-touch-the-print-server-during-a-game
+      # invariant in its test suite, so the tests MUST run here, with the race
+      # detector — not just vet/build.
+      - name: gofmt, vet, test (race) & build
+        run: |
+          test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+          go vet ./...
+          go test -race ./...
+          go build ./...
+
+      # The legacy Nexus integration tests (build tag `integration`) run the real
+      # SQL against a database seeded from production dumps, which are not part of
+      # this public mirror. They self-skip without NEXUS_TEST_DSN; here we only
+      # confirm they still compile so the build tag doesn't rot.
+      - name: Build integration-tagged tests
+        run: go build -tags=integration ./...
+
+  security:
+    name: Vulnerability scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          check-latest: true
+
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+  image:
+    name: Build image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build agent image (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false

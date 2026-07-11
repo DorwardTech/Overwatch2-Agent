@@ -11,10 +11,12 @@ package proxy
 
 import (
 	"encoding/json"
+	"errors"
 	"log"
 	"net"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"overwatch/agent/internal/cache"
 	"overwatch/agent/internal/ozonefix"
@@ -93,10 +95,14 @@ func (s *Server) acceptLoop(ln net.Listener) {
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
-			if s.closed.Load() {
+			if s.closed.Load() || errors.Is(err, net.ErrClosed) {
 				return
 			}
-			return
+			// Transient accept error (EMFILE, resets): the proxy is TORN's
+			// game server — log and keep accepting rather than dying silently.
+			log.Printf("[agent] proxy: accept failed: %v (retrying)", err)
+			time.Sleep(200 * time.Millisecond)
+			continue
 		}
 		go s.handle(conn)
 	}
@@ -108,6 +114,14 @@ func (s *Server) handle(conn net.Conn) {
 		s.conns.Add(-1)
 		_ = conn.Close()
 	}()
+
+	// TORN keeps its connection open between games, so an idle read deadline
+	// would cut a healthy client; TCP keepalive reaps only dead peers, freeing
+	// goroutines pinned by half-open connections.
+	if tcp, ok := conn.(*net.TCPConn); ok {
+		_ = tcp.SetKeepAlive(true)
+		_ = tcp.SetKeepAlivePeriod(time.Minute)
+	}
 
 	// Push the 2-frame connect banner before answering any command.
 	for _, frame := range s.banner {

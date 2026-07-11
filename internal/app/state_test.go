@@ -59,7 +59,7 @@ func TestReconcileStateBackstop(t *testing.T) {
 }
 
 func TestHandleBusEventTransitions(t *testing.T) {
-	a := &App{pendingFetch: map[int]bool{}, fetchedGames: map[int]bool{}}
+	a := &App{pendingFetch: map[int]*pendingGame{}, fetchedGames: map[int]bool{}, givenUpFetch: map[int]bool{}}
 	a.cfg.GameFinishDelay = 0 // afterFinish returns quickly
 
 	start, _ := msgbus.Parse("[1001, 42, -1]")

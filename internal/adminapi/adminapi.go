@@ -78,13 +78,12 @@ func (s *Server) routes() http.Handler {
 	return s.auth(mux)
 }
 
-// auth enforces a bearer token on every route. The token is compared in constant
-// time (crypto/subtle) so the check doesn't leak the secret via timing.
+// auth enforces a bearer token on every route in constant time.
 func (s *Server) auth(next http.Handler) http.Handler {
-	expected := []byte("Bearer " + s.token)
+	expect := []byte("Bearer " + s.token)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got := []byte(r.Header.Get("Authorization"))
-		if subtle.ConstantTimeCompare(got, expected) != 1 {
+		if subtle.ConstantTimeCompare(got, expect) != 1 {
 			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 			return
 		}

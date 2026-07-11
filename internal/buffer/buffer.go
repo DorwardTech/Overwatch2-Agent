@@ -1,9 +1,17 @@
-// Package buffer is a bounded in-memory FIFO of unsent payloads. When central is
+// Package buffer is a bounded FIFO of unsent payloads. When central is
 // unreachable, batches are queued here and replayed oldest-first on recovery;
 // when full, the oldest batch is dropped (recent telemetry matters most).
+// The queue lives in memory; Save/Load spill it to disk across restarts so an
+// outage that overlaps a restart (redeploy, reboot_agent) doesn't silently
+// drop buffered telemetry.
 package buffer
 
-import "sync"
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"sync"
+)
 
 // Entry is a queued payload with its idempotency key.
 type Entry struct {
@@ -57,4 +65,63 @@ func (b *Buffer) Len() int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return len(b.items)
+}
+
+// Save writes the queued entries to path (atomic: temp file + rename). An
+// empty buffer removes the file so a later Load starts clean.
+func (b *Buffer) Save(path string) error {
+	b.mu.Lock()
+	items := make([]Entry, len(b.items))
+	copy(items, b.items)
+	b.mu.Unlock()
+
+	if len(items) == 0 {
+		err := os.Remove(path)
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+
+	data, err := json.Marshal(items)
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// Load restores previously-saved entries (oldest-first, capacity-bounded) and
+// removes the spill file. Returns the number of entries restored; a missing
+// file is not an error.
+func (b *Buffer) Load(path string) (int, error) {
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+
+	var items []Entry
+	if err := json.Unmarshal(data, &items); err != nil {
+		_ = os.Remove(path) // corrupt spill: drop it rather than crash-loop
+		return 0, err
+	}
+
+	b.mu.Lock()
+	if len(items) > b.max {
+		items = items[len(items)-b.max:] // keep the most recent
+	}
+	b.items = append(items, b.items...)
+	b.mu.Unlock()
+
+	_ = os.Remove(path)
+	return len(items), nil
 }

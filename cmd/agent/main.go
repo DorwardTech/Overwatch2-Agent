@@ -14,6 +14,7 @@ import (
 
 	"overwatch/agent/internal/app"
 	"overwatch/agent/internal/config"
+	legacyapp "overwatch/agent/internal/legacy/app"
 )
 
 func main() {
@@ -40,7 +41,16 @@ func main() {
 		log.Println("[agent] shutdown signal received, draining…")
 	}()
 
-	app.New(cfg).Run(ctx)
+	if cfg.Mode == "legacy" {
+		log.Printf("[agent] legacy (Nexus) mode: %s + %s", cfg.NexusDSN, cfg.LasertagURL)
+		legacy, err := legacyapp.New(cfg)
+		if err != nil {
+			log.Fatalf("[agent] legacy startup error: %v", err)
+		}
+		legacy.Run(ctx)
+	} else {
+		app.New(cfg).Run(ctx)
+	}
 	log.Println("[agent] stopped")
 	os.Exit(0)
 }

@@ -5,9 +5,9 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
-	"math"
-	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -35,6 +35,40 @@ const (
 	stateFinishing int32 = 2
 )
 
+// errGameActive is returned when a print-server operation is refused because a
+// game is (or became) active. It is not a fetch failure: the work is retried in
+// the next safe window without burning a retry attempt.
+var errGameActive = errors.New("game in progress: print server off-limits")
+
+// Per-game retry policy for results fetches. A game whose fetch keeps failing
+// (e.g. the print server is stuck on it) backs off exponentially and is
+// abandoned after maxFetchAttempts so it can't hammer the print server on every
+// poll forever. Abandoned games are surfaced in the agent self-report and can
+// still be recovered manually via a refetch_game command.
+const (
+	maxFetchAttempts = 10
+	fetchBackoffBase = 30 * time.Second
+	fetchBackoffMax  = 30 * time.Minute
+)
+
+// pendingGame tracks the retry state of one finished game awaiting fetch.
+type pendingGame struct {
+	attempts  int
+	nextRetry time.Time // zero = due immediately
+}
+
+// fetchBackoff returns the wait before retry number attempts+1.
+func fetchBackoff(attempts int) time.Duration {
+	d := fetchBackoffBase
+	for i := 1; i < attempts && d < fetchBackoffMax; i++ {
+		d *= 2
+	}
+	if d > fetchBackoffMax {
+		return fetchBackoffMax
+	}
+	return d
+}
+
 type App struct {
 	cfg          config.Config
 	pusher       *push.Pusher
@@ -47,10 +81,12 @@ type App struct {
 	serverMode   atomic.Int32 // latest O-Zone SERVERMODE
 	gameState    atomic.Int32 // idle/active/finishing (Message Bus driven)
 	fetchedGames map[int]bool
-	pendingFetch map[int]bool // finished games awaiting a safe (non-game) window
-	mu           sync.Mutex   // guards fetchedGames + pendingFetch + lastBusGame
-	resultsMu    sync.Mutex   // serialises O-Zone results-API access
-	cmdBusy      atomic.Bool  // single-flight for command processing
+	pendingFetch map[int]*pendingGame // finished games awaiting a safe (non-game) window
+	givenUpFetch map[int]bool         // games abandoned after maxFetchAttempts
+	mu           sync.Mutex           // guards fetchedGames + pendingFetch + givenUpFetch + lastBusGame
+	resultsMu    sync.Mutex           // serialises O-Zone results-API access
+	cmdBusy      atomic.Bool          // single-flight for command processing
+	stopRun      context.CancelFunc   // set by Run; requestShutdown cancels it (graceful reboot)
 
 	store *store.Store   // local verbatim game cache (nil if disabled/unavailable)
 	cache *cache.Cache   // O-Zone-shaped view over the store
@@ -60,13 +96,26 @@ type App struct {
 
 func New(cfg config.Config) *App {
 	a := &App{
-		cfg:          cfg,
-		pusher:       push.New(cfg.CentralURL, cfg.Token),
-		buf:          buffer.New(cfg.BufferMax),
-		health:       health.New(),
+		cfg:    cfg,
+		pusher: push.New(cfg.CentralURL, cfg.Token),
+		buf:    buffer.New(cfg.BufferMax),
+		health: health.New(),
+		// Seed push_seq from the clock so idempotency keys never repeat across
+		// restarts (pushes are >1s apart, so seconds always outrun the counter).
+		seq:          time.Now().Unix(),
 		startedAt:    time.Now(),
 		fetchedGames: map[int]bool{},
-		pendingFetch: map[int]bool{},
+		pendingFetch: map[int]*pendingGame{},
+		givenUpFetch: map[int]bool{},
+	}
+
+	// Restore telemetry spilled by the previous process (outage + restart).
+	if cfg.BufferFile != "" {
+		if n, err := a.buf.Load(cfg.BufferFile); err != nil {
+			log.Printf("[agent] buffer: restore failed: %v", err)
+		} else if n > 0 {
+			log.Printf("[agent] buffer: restored %d unsent batch(es) from %s", n, cfg.BufferFile)
+		}
 	}
 
 	if cfg.CacheEnabled {
@@ -111,14 +160,23 @@ func (a *App) Overview() map[string]any {
 	if a.store != nil {
 		games = a.store.Count()
 	}
-	return map[string]any{
+	pending, givenUp := a.resultsBacklog()
+	overview := map[string]any{
 		"games":             games,
 		"state":             stateName(a.gameState.Load()),
 		"server_mode":       int(a.serverMode.Load()),
 		"msg_bus_connected": a.bus != nil && a.bus.Connected(),
 		"version":           a.cfg.Version,
 		"uptime_seconds":    int(time.Since(a.startedAt).Seconds()),
+		"results_pending":   pending,
+		"results_given_up":  givenUp,
+		"buffered":          a.buf.Len(),
 	}
+	if a.proxy != nil {
+		overview["proxy_connections"] = a.proxy.Connections()
+		overview["proxy_served"] = a.proxy.Served()
+	}
+	return overview
 }
 
 // Resync triggers an idle-gated cache refresh in the background.
@@ -144,6 +202,16 @@ func stateName(s int32) string {
 }
 
 func (a *App) Run(ctx context.Context) {
+	// Wrap the signal context so a reboot_agent command can also stop the run
+	// gracefully (deferred closers run, the buffer spills to disk).
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	a.stopRun = cancel
+
+	if a.cfg.BufferFile != "" {
+		defer a.saveBuffer()
+	}
+
 	go a.health.Serve(a.cfg.HealthAddr)
 
 	if a.bus != nil {
@@ -250,12 +318,6 @@ func (a *App) collect(client *ozone.Client, slow bool) ([]byte, string, error) {
 		return nil, "", err
 	}
 	mode := toInt(server["SERVERMODE"])
-	// SERVERMODE is a small enum, but toInt yields a platform-width int; bound it
-	// against the int32 range before the atomic store so the conversion can't
-	// overflow (CodeQL go/incorrect-integer-conversion).
-	if mode < math.MinInt32 || mode > math.MaxInt32 {
-		mode = 0
-	}
 	a.serverMode.Store(int32(mode))
 	a.reconcileState(mode)
 	if a.cfg.ResultsEnabled {
@@ -288,13 +350,16 @@ func (a *App) collect(client *ozone.Client, slow bool) ([]byte, string, error) {
 			payload["licence_info"] = l
 		}
 		// Agent self-report: version + health, so central can surface it.
+		pending, givenUp := a.resultsBacklog()
 		payload["agent"] = map[string]any{
-			"version":        a.cfg.Version,
-			"buffered":       a.buf.Len(),
-			"uptime_seconds": int(time.Since(a.startedAt).Seconds()),
-			"poll_interval":  int(a.cfg.PollInterval.Seconds()),
-			"results":        a.cfg.ResultsEnabled,
-			"commands":       a.cfg.CommandsEnabled,
+			"version":          a.cfg.Version,
+			"buffered":         a.buf.Len(),
+			"uptime_seconds":   int(time.Since(a.startedAt).Seconds()),
+			"poll_interval":    int(a.cfg.PollInterval.Seconds()),
+			"results":          a.cfg.ResultsEnabled,
+			"commands":         a.cfg.CommandsEnabled,
+			"results_pending":  pending,
+			"results_given_up": givenUp,
 		}
 	}
 
@@ -349,16 +414,21 @@ func (a *App) checkGameResults(server map[string]any) {
 	}
 }
 
-// drainPendingFetches fetches every queued finished game. Called only from a
-// safe (non-game) server mode.
+// drainPendingFetches fetches every queued finished game that is due (its
+// per-game backoff has elapsed). Called only from a safe (non-game) server mode.
 func (a *App) drainPendingFetches() {
+	now := time.Now()
 	a.mu.Lock()
 	pending := make([]int, 0, len(a.pendingFetch))
-	for n := range a.pendingFetch {
+	for n, p := range a.pendingFetch {
+		if now.Before(p.nextRetry) {
+			continue // backing off; not due yet
+		}
 		pending = append(pending, n)
 	}
 	a.mu.Unlock()
 
+	sort.Ints(pending) // oldest game first
 	for _, n := range pending {
 		if a.isFetched(n) {
 			a.clearPending(n)
@@ -370,7 +440,8 @@ func (a *App) drainPendingFetches() {
 
 // fetchGameResults handles the automatic finish path. It refuses to run during
 // active play, and yields (TryLock) if a command-driven sync is using the
-// results API — retrying on a later poll.
+// results API — retrying on a later poll. Genuine fetch failures back off
+// per-game and give up after maxFetchAttempts.
 func (a *App) fetchGameResults(gameNumber int) {
 	if !a.safeForPrintServer(int(a.serverMode.Load())) {
 		return // a game is active; never touch the print server now
@@ -381,7 +452,10 @@ func (a *App) fetchGameResults(gameNumber int) {
 	defer a.resultsMu.Unlock()
 
 	if err := a.pullGameResults(gameNumber); err != nil {
-		log.Printf("[agent] results: game #%d failed: %v", gameNumber, err)
+		if errors.Is(err, errGameActive) {
+			return // a game started under us; retry in the next safe window
+		}
+		a.noteFetchFailure(gameNumber, err)
 		return
 	}
 	a.markFetched(gameNumber)
@@ -389,9 +463,56 @@ func (a *App) fetchGameResults(gameNumber int) {
 	log.Printf("[agent] results: game #%d synced to central", gameNumber)
 }
 
+// noteFetchFailure records a failed results fetch: exponential per-game backoff,
+// abandoning the game after maxFetchAttempts so a stuck print-server game can't
+// be hammered on every poll forever (the #347 failure mode).
+func (a *App) noteFetchFailure(n int, err error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	p := a.pendingFetch[n]
+	if p == nil {
+		p = &pendingGame{}
+		a.pendingFetch[n] = p
+	}
+	p.attempts++
+	if p.attempts >= maxFetchAttempts {
+		delete(a.pendingFetch, n)
+		a.givenUpFetch[n] = true
+		if len(a.givenUpFetch) > 100 {
+			a.givenUpFetch = map[int]bool{n: true} // bound memory
+		}
+		log.Printf("[agent] results: game #%d abandoned after %d attempts: %v (recover with a refetch_game command)",
+			n, p.attempts, err)
+		return
+	}
+	wait := fetchBackoff(p.attempts)
+	p.nextRetry = time.Now().Add(wait)
+	log.Printf("[agent] results: game #%d failed (attempt %d/%d, next retry in %s): %v",
+		n, p.attempts, maxFetchAttempts, wait, err)
+}
+
+// resultsBacklog reports the pending-fetch depth and the abandoned games, for
+// the agent self-report and the admin API.
+func (a *App) resultsBacklog() (pending int, givenUp []int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	givenUp = make([]int, 0, len(a.givenUpFetch))
+	for n := range a.givenUpFetch {
+		givenUp = append(givenUp, n)
+	}
+	sort.Ints(givenUp)
+	return len(a.pendingFetch), givenUp
+}
+
 // pullGameResults fetches one game from O-Zone's results API and pushes it to
-// central. Shared by the automatic finish detector and the command queue.
+// central. Shared by the automatic finish detector and the command queue. It is
+// the single chokepoint for per-game print-server access: every caller gets the
+// idle-gate re-checked here, closing any window between an earlier check and
+// the actual connection.
 func (a *App) pullGameResults(gameNumber int) error {
+	if !a.safeForPrintServer(int(a.serverMode.Load())) {
+		return errGameActive
+	}
 	rc, err := results.Dial(a.cfg.OzoneHost, a.cfg.OzoneResultsPort, 5*time.Second)
 	if err != nil {
 		return err
@@ -453,8 +574,13 @@ func (a *App) processCommands() {
 		log.Printf("[agent] commands: #%d (%s) -> %s", c.ID, c.Type, status)
 
 		if c.Type == "reboot_agent" && status == "acked" {
-			log.Printf("[agent] reboot requested — exiting for container restart")
-			os.Exit(0)
+			// Stop the run loop gracefully (defers run, the buffer spills to
+			// disk) and let the container restart policy bring us back up.
+			log.Printf("[agent] reboot requested — shutting down for container restart")
+			if a.stopRun != nil {
+				a.stopRun()
+			}
+			return
 		}
 	}
 }
@@ -463,7 +589,7 @@ func (a *App) processCommands() {
 // server (and so must be blocked during active play).
 func isResultsCommand(t string) bool {
 	switch t {
-	case "refetch_game", "backfill_all", "resync_all", "cache_resync":
+	case "refetch_game", "backfill_all", "resync_all":
 		return true
 	}
 	return false
@@ -748,6 +874,11 @@ func (a *App) runCommand(c push.Command) (string, map[string]any) {
 		a.resultsMu.Lock()
 		err := a.pullGameResults(n)
 		a.resultsMu.Unlock()
+		if errors.Is(err, errGameActive) {
+			// A game started between the command-queue gate and now; central
+			// re-queues deferred commands for the next safe window.
+			return "deferred", map[string]any{"reason": "game in progress", "game_number": n}
+		}
 		if err != nil {
 			return "failed", map[string]any{"error": err.Error(), "game_number": n}
 		}
@@ -762,32 +893,6 @@ func (a *App) runCommand(c push.Command) (string, map[string]any) {
 	case "reboot_agent":
 		// The actual restart is handled after the ack so it isn't repeated.
 		return "acked", map[string]any{"rebooting": true}
-
-	case "agent_overview":
-		// Read-only status snapshot — identical to the admin API's /overview.
-		// Lets an operator reach the agent's admin view through central without
-		// any inbound path to the venue.
-		return "acked", a.Overview()
-
-	case "cache_resync":
-		// Idle-gated cache refresh — the admin API's /resync. Listed in
-		// isResultsCommand so central re-queues it until the server is idle
-		// rather than running it during a live game.
-		a.refreshCache()
-		n := 0
-		if a.store != nil {
-			n = a.store.Count()
-		}
-		return "acked", map[string]any{"games": n}
-
-	case "cache_purge":
-		// Drop every cached game — the admin API's /purge. Local filesystem
-		// only, so it never touches the print server and is safe any time.
-		n, err := a.Purge()
-		if err != nil {
-			return "failed", map[string]any{"error": err.Error()}
-		}
-		return "acked", map[string]any{"purged": n}
 
 	default:
 		return "failed", map[string]any{"error": "unsupported command type: " + c.Type}
@@ -839,6 +944,15 @@ func (a *App) syncGames(payload map[string]any, force bool) (string, map[string]
 			skipped++
 			continue
 		}
+		// Stop immediately if a game starts mid-batch — a long backfill must
+		// never keep pulling from the print server during active play. Central
+		// re-queues the deferred command for the next safe window.
+		if !a.safeForPrintServer(int(a.serverMode.Load())) {
+			log.Printf("[agent] sync aborted: game started mid-batch (%d synced so far)", synced)
+			return "deferred", map[string]any{
+				"reason": "game started mid-batch", "synced": synced, "skipped": skipped, "failed": failed,
+			}
+		}
 		raw, err := rc.GameDataRaw(num, 20*time.Second)
 		if err != nil {
 			failed++
@@ -874,18 +988,26 @@ func (a *App) markFetched(n int) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.fetchedGames[n] = true
+	delete(a.givenUpFetch, n) // a manual refetch recovers an abandoned game
 	if len(a.fetchedGames) > 500 {
 		a.fetchedGames = map[int]bool{n: true} // bound memory; re-pushes are idempotent
 	}
 }
 
 // queueFetch records a finished game awaiting a safe window to be fetched.
+// Re-queueing an already-pending game keeps its retry state (backoff must not
+// reset just because the finish was noticed again on a later poll).
 func (a *App) queueFetch(n int) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.pendingFetch[n] = true
+	if a.givenUpFetch[n] {
+		return // abandoned after repeated failures; only refetch_game revives it
+	}
+	if _, ok := a.pendingFetch[n]; !ok {
+		a.pendingFetch[n] = &pendingGame{}
+	}
 	if len(a.pendingFetch) > 500 {
-		a.pendingFetch = map[int]bool{n: true} // bound memory
+		a.pendingFetch = map[int]*pendingGame{n: a.pendingFetch[n]} // bound memory
 	}
 }
 
@@ -893,6 +1015,15 @@ func (a *App) clearPending(n int) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	delete(a.pendingFetch, n)
+}
+
+// saveBuffer spills unsent telemetry to disk so it survives the restart.
+func (a *App) saveBuffer() {
+	if err := a.buf.Save(a.cfg.BufferFile); err != nil {
+		log.Printf("[agent] buffer: spill failed: %v", err)
+	} else if n := a.buf.Len(); n > 0 {
+		log.Printf("[agent] buffer: spilled %d unsent batch(es) to %s", n, a.cfg.BufferFile)
+	}
 }
 
 // toInt coerces O-Zone JSON values (float64, string, int) to an int.

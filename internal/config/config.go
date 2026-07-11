@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"strconv"
 	"time"
@@ -25,6 +26,15 @@ type Config struct {
 	SlowPollInterval time.Duration
 	HealthAddr       string
 	BufferMax        int
+	BufferFile       string // spill unsent telemetry here across restarts ("" disables)
+
+	// Mode selects the data source. "ozone" (default) polls the O-Zone WS/print
+	// server; "legacy" polls a P&C Micros Nexus site via its MySQL DB + on-box
+	// management app.
+	Mode             string
+	NexusDSN         string        // go-sql-driver DSN for the Nexus ng_system DB (legacy mode)
+	LasertagURL      string        // base URL of the on-box management app (legacy mode)
+	GameSyncInterval time.Duration // how often to pull finished Nexus games
 
 	// Print-server cache + idle-gating (ported from the Lattice ozone-agent).
 	MsgBusEnabled   bool          // consume the External Message Bus for game state
@@ -61,6 +71,12 @@ func Load() (Config, error) {
 		SlowPollInterval: time.Duration(envInt("SLOW_POLL_INTERVAL", 60)) * time.Second,
 		HealthAddr:       env("HEALTH_ADDR", ":8088"),
 		BufferMax:        envInt("BUFFER_MAX", 2000),
+		BufferFile:       env("BUFFER_FILE", ""),
+
+		Mode:             env("AGENT_MODE", "ozone"),
+		NexusDSN:         os.Getenv("NEXUS_DSN"),
+		LasertagURL:      env("LASERTAG_URL", ""),
+		GameSyncInterval: time.Duration(envInt("GAME_SYNC_INTERVAL", 30)) * time.Second,
 
 		// Opt-in per venue: enabling these makes the agent connect to O-Zone's
 		// message bus / print server. Off by default so existing fleet agents
@@ -86,9 +102,28 @@ func Load() (Config, error) {
 	if c.Token == "" {
 		return c, fmt.Errorf("AGENT_TOKEN is required")
 	}
+	if c.Mode == "legacy" {
+		if c.NexusDSN == "" {
+			return c, fmt.Errorf("NEXUS_DSN is required in legacy mode")
+		}
+		if c.LasertagURL == "" {
+			return c, fmt.Errorf("LASERTAG_URL is required in legacy mode")
+		}
+	}
+	// Central marks an agent offline after ~30s without a push; an idle poll at
+	// or above that flaps the site "offline" between pushes.
+	if c.IdlePollInterval >= 30*time.Second {
+		log.Printf("[agent] config: IDLE_POLL_INTERVAL=%s is at/above central's 30s offline window — the site will flap offline", c.IdlePollInterval)
+	}
+	if c.PollInterval < time.Second {
+		log.Printf("[agent] config: POLL_INTERVAL below 1s clamped to 1s")
+		c.PollInterval = time.Second
+	}
 	return c, nil
 }
 
+// envBool parses k as a bool, warning (rather than silently defaulting) on a
+// malformed value so a typo'd flag doesn't go unnoticed for weeks.
 func envBool(k string, def bool) bool {
 	v := os.Getenv(k)
 	if v == "" {
@@ -96,6 +131,7 @@ func envBool(k string, def bool) bool {
 	}
 	b, err := strconv.ParseBool(v)
 	if err != nil {
+		log.Printf("[agent] config: %s=%q is not a boolean — using default %v", k, v, def)
 		return def
 	}
 	return b
@@ -108,11 +144,17 @@ func env(k, def string) string {
 	return def
 }
 
+// envInt parses k as an integer, warning on a malformed value (e.g. "5s"
+// where plain seconds are expected).
 func envInt(k string, def int) int {
-	if v := os.Getenv(k); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			return n
-		}
+	v := os.Getenv(k)
+	if v == "" {
+		return def
 	}
-	return def
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		log.Printf("[agent] config: %s=%q is not an integer — using default %d", k, v, def)
+		return def
+	}
+	return n
 }

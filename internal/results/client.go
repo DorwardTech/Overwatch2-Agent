@@ -1,21 +1,17 @@
 // Package results is a TCP client for O-Zone's binary Print Server / results API
 // (port 12123): a 5-byte header — 4-byte little-endian payload length followed by
-// the 0x28 token byte — then a JSON payload. Used to fetch completed game data
-// (per-pack hit zones + fitness) after a game finishes.
+// the 0x28 token byte — then a JSON payload (framing shared via ozoneproto).
+// Used to fetch completed game data (per-pack hit zones + fitness) after a game
+// finishes.
 package results
 
 import (
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net"
 	"time"
-)
 
-const (
-	tokenByte  = 0x28
-	maxPayload = 10 << 20 // 10 MiB safety cap
+	"overwatch/agent/internal/ozoneproto"
 )
 
 type Client struct {
@@ -94,7 +90,7 @@ func (c *Client) send(cmd map[string]any, timeout time.Duration) error {
 		return err
 	}
 	_ = c.conn.SetWriteDeadline(time.Now().Add(timeout))
-	_, err = c.conn.Write(frame(body))
+	_, err = c.conn.Write(ozoneproto.Frame(body))
 	return err
 }
 
@@ -110,40 +106,8 @@ func (c *Client) receive(timeout time.Duration) (map[string]any, error) {
 	return out, nil
 }
 
-// readFrame reads one length-prefixed, 0x28-tokened message and returns its body.
+// readFrame reads one framed message within the timeout and returns its body.
 func (c *Client) readFrame(timeout time.Duration) ([]byte, error) {
 	_ = c.conn.SetReadDeadline(time.Now().Add(timeout))
-
-	header := make([]byte, 5)
-	if _, err := io.ReadFull(c.conn, header); err != nil {
-		return nil, err
-	}
-	if header[4] != tokenByte {
-		return nil, fmt.Errorf("unexpected token byte 0x%x", header[4])
-	}
-	length := int(binary.LittleEndian.Uint32(header[:4]))
-	if length <= 0 || length > maxPayload {
-		return nil, fmt.Errorf("invalid payload length %d", length)
-	}
-
-	body := make([]byte, length)
-	if _, err := io.ReadFull(c.conn, body); err != nil {
-		return nil, err
-	}
-	return body, nil
-}
-
-// frame builds the 5-byte header (little-endian length + 0x28 token) + JSON body.
-// Bodies are bounded by maxPayload, so the length fits the uint32 header field;
-// an over-size body (never expected) is capped defensively rather than overflowing.
-func frame(body []byte) []byte {
-	if len(body) > maxPayload {
-		body = body[:maxPayload]
-	}
-	n := len(body) // 0 <= n <= maxPayload, so it fits in uint32
-	packet := make([]byte, 5+n)
-	binary.LittleEndian.PutUint32(packet[:4], uint32(n))
-	packet[4] = tokenByte
-	copy(packet[5:], body)
-	return packet
+	return ozoneproto.ReadFrame(c.conn)
 }

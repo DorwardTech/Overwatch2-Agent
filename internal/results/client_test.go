@@ -7,11 +7,13 @@ import (
 	"net"
 	"testing"
 	"time"
+
+	"overwatch/agent/internal/ozoneproto"
 )
 
 func TestFrameHeader(t *testing.T) {
 	body := []byte(`{"command":"list"}`)
-	pkt := frame(body)
+	pkt := ozoneproto.Frame(body)
 
 	if len(pkt) != 5+len(body) {
 		t.Fatalf("packet length = %d, want %d", len(pkt), 5+len(body))
@@ -19,7 +21,7 @@ func TestFrameHeader(t *testing.T) {
 	if got := int(binary.LittleEndian.Uint32(pkt[:4])); got != len(body) {
 		t.Fatalf("header length = %d, want %d", got, len(body))
 	}
-	if pkt[4] != tokenByte {
+	if pkt[4] != ozoneproto.TokenByte {
 		t.Fatalf("token byte = 0x%x, want 0x28", pkt[4])
 	}
 }
@@ -57,7 +59,7 @@ func TestGameDataRoundTrip(t *testing.T) {
 			"game":    map[string]any{"gamenum": 3, "gamename": "TDM"},
 			"players": map[string]any{},
 		})
-		_, _ = conn.Write(frame(resp))
+		_, _ = conn.Write(ozoneproto.Frame(resp))
 	}()
 
 	host, port, _ := net.SplitHostPort(ln.Addr().String())
@@ -102,7 +104,7 @@ func TestGameListRoundTrip(t *testing.T) {
 				map[string]any{"gamenum": 2, "valid": 0, "gamename": "Invalid"},
 			},
 		})
-		_, _ = conn.Write(frame(resp))
+		_, _ = conn.Write(ozoneproto.Frame(resp))
 	}()
 
 	host, port, _ := net.SplitHostPort(ln.Addr().String())
@@ -140,8 +142,8 @@ func TestDrainThenGameData(t *testing.T) {
 		defer conn.Close()
 
 		// Handshake: texts + event_types.
-		_, _ = conn.Write(frame([]byte(`{"texts":{}}`)))
-		_, _ = conn.Write(frame([]byte(`{"event_types":{}}`)))
+		_, _ = conn.Write(ozoneproto.Frame([]byte(`{"texts":{}}`)))
+		_, _ = conn.Write(ozoneproto.Frame([]byte(`{"event_types":{}}`)))
 
 		// Then answer the command with real game data.
 		hdr := make([]byte, 5)
@@ -157,7 +159,7 @@ func TestDrainThenGameData(t *testing.T) {
 			"game":    map[string]any{"gamename": "Domination"},
 			"players": map[string]any{"1": map[string]any{"alias": "Ava"}},
 		})
-		_, _ = conn.Write(frame(resp))
+		_, _ = conn.Write(ozoneproto.Frame(resp))
 	}()
 
 	host, port, _ := net.SplitHostPort(ln.Addr().String())
