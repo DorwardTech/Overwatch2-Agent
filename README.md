@@ -75,6 +75,7 @@ LAN only** — never expose it publicly. The JSON API is also available directly
 | `GET` | `/api/games/{n}` | verbatim O-Zone payload for game `n` |
 | `POST` | `/api/resync` | idle-gated cache refresh |
 | `POST` | `/api/purge` | drop all cached games |
+| `POST` | `/api/collect` | pull games from central into the cache (`?from=&to=`, optional) |
 
 All `/api/*` calls require `Authorization: Bearer <ADMIN_API_TOKEN>`.
 

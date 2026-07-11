@@ -11,6 +11,7 @@
 //	GET  /api/games/{n}     verbatim "all" payload for one game
 //	POST /api/resync        trigger an idle-gated cache refresh
 //	POST /api/purge         drop all cached games
+//	POST /api/collect       pull games from central (Overwatch) into the cache
 package adminapi
 
 import (
@@ -18,9 +19,11 @@ import (
 	"crypto/subtle"
 	_ "embed"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"overwatch/agent/internal/store"
@@ -41,6 +44,9 @@ type Backend interface {
 	Overview() map[string]any
 	Resync()
 	Purge() (int, error)
+	// Collect pulls games from central (Overwatch) into the cache for the window
+	// [from, to] (zero bounds are open-ended), skipping already-cached games.
+	Collect(from, to time.Time) (map[string]any, error)
 }
 
 // Server hosts the admin API.
@@ -96,6 +102,7 @@ func (s *Server) apiRoutes() http.Handler {
 	mux.HandleFunc("GET /api/games/{n}", s.handleGame)
 	mux.HandleFunc("POST /api/resync", s.handleResync)
 	mux.HandleFunc("POST /api/purge", s.handlePurge)
+	mux.HandleFunc("POST /api/collect", s.handleCollect)
 	return mux
 }
 
@@ -164,6 +171,44 @@ func (s *Server) handlePurge(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"purged": n})
+}
+
+// handleCollect pulls games from central into the cache. The window is given by
+// optional `from`/`to` query params (RFC3339, "2006-01-02T15:04", O-Zone's
+// "2006-01-02 15:04:05", or a bare "2006-01-02"); omit a bound to leave it open.
+func (s *Server) handleCollect(w http.ResponseWriter, r *http.Request) {
+	from, err := parseTimeParam(r.URL.Query().Get("from"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid 'from': " + err.Error()})
+		return
+	}
+	to, err := parseTimeParam(r.URL.Query().Get("to"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid 'to': " + err.Error()})
+		return
+	}
+	res, err := s.backend.Collect(from, to)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+// parseTimeParam parses an optional timeframe bound. Empty yields the zero time
+// (an open bound). It accepts several common layouts so the browser's
+// datetime-local value works as-is.
+func parseTimeParam(v string) (time.Time, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return time.Time{}, nil
+	}
+	for _, layout := range []string{time.RFC3339, "2006-01-02T15:04", "2006-01-02 15:04:05", "2006-01-02"} {
+		if t, err := time.Parse(layout, v); err == nil {
+			return t, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("unrecognised time %q", v)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

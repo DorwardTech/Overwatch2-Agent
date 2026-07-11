@@ -98,6 +98,22 @@
     </section>
 
     <section class="card">
+      <h2>Collect from Overwatch</h2>
+      <p class="faint" style="margin:-4px 0 12px">
+        Pull games from the central Overwatch store into this agent's cache — only
+        games not already cached. Safe to run during a live game (it never touches
+        the game server).
+      </p>
+      <div class="row" style="align-items:flex-end">
+        <div><label for="cFrom">From</label><input id="cFrom" type="datetime-local" /></div>
+        <div><label for="cTo">To</label><input id="cTo" type="datetime-local" /></div>
+        <button class="btn primary" id="collect">Collect from Overwatch</button>
+        <button class="btn" id="collectAll" title="Ignore the dates and pull everything not cached">All time</button>
+      </div>
+      <div id="collectMsg" class="muted" style="margin-top:10px"></div>
+    </section>
+
+    <section class="card">
       <h2>Cached games</h2>
       <div id="gamesWrap"><p class="faint">Loading…</p></div>
     </section>
@@ -240,9 +256,47 @@
     toast(msg || "Request failed", true);
   }
 
+  function toLocalInput(d) {
+    const p = (n) => String(n).padStart(2, "0");
+    return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()) +
+      "T" + p(d.getHours()) + ":" + p(d.getMinutes());
+  }
+
+  async function collect(allTime) {
+    const btn = allTime ? $("collectAll") : $("collect");
+    const q = new URLSearchParams();
+    if (!allTime) {
+      if ($("cFrom").value) q.set("from", $("cFrom").value);
+      if ($("cTo").value) q.set("to", $("cTo").value);
+    }
+    const label = btn.textContent;
+    btn.disabled = true; btn.textContent = "Collecting…";
+    $("collectMsg").textContent = "Contacting Overwatch…";
+    try {
+      const r = await api("/api/collect?" + q.toString(), { method: "POST" });
+      $("collectMsg").textContent =
+        "Collected " + (r.collected ?? 0) + " · already cached " + (r.already_cached ?? 0) +
+        (r.out_of_range ? " · outside window " + r.out_of_range : "") +
+        (r.failed ? " · failed " + r.failed : "") +
+        " · central had " + (r.central_total ?? 0);
+      toast("Collected " + (r.collected ?? 0) + " game(s) from Overwatch.");
+      refresh();
+    } catch (e) {
+      $("collectMsg").textContent = "";
+      handle(e, "Collect failed");
+    } finally {
+      btn.disabled = false; btn.textContent = label;
+    }
+  }
+
   function showDash() {
     $("gate").classList.add("hidden");
     $("dash").classList.remove("hidden");
+    if (!$("cFrom").value) {
+      const now = new Date();
+      $("cFrom").value = toLocalInput(new Date(now.getTime() - 7 * 86400000));
+      $("cTo").value = toLocalInput(now);
+    }
     refresh();
   }
   function lock(msg) {
@@ -275,6 +329,8 @@
   $("unlock").addEventListener("click", unlock);
   $("tok").addEventListener("keydown", (e) => { if (e.key === "Enter") unlock(); });
   $("refresh").addEventListener("click", refresh);
+  $("collect").addEventListener("click", () => collect(false));
+  $("collectAll").addEventListener("click", () => collect(true));
   $("lock").addEventListener("click", () => lock());
   $("rawClose").addEventListener("click", () => $("rawCard").classList.add("hidden"));
   $("resync").addEventListener("click", async () => {

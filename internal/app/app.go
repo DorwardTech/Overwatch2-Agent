@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"sort"
 	"strconv"
@@ -86,6 +87,7 @@ type App struct {
 	mu           sync.Mutex           // guards fetchedGames + pendingFetch + givenUpFetch + lastBusGame
 	resultsMu    sync.Mutex           // serialises O-Zone results-API access
 	cmdBusy      atomic.Bool          // single-flight for command processing
+	collectBusy  atomic.Bool          // single-flight for a "collect from central" run
 	stopRun      context.CancelFunc   // set by Run; requestShutdown cancels it (graceful reboot)
 
 	store *store.Store   // local verbatim game cache (nil if disabled/unavailable)
@@ -790,6 +792,89 @@ func (a *App) restoreFromCentral(ctx context.Context) {
 	if restored > 0 {
 		log.Printf("[agent] cache: restored %d game(s) from central failover", restored)
 	}
+}
+
+// ozoneStartLayout is O-Zone's start_time format (SQL NOW(), naive local time).
+const ozoneStartLayout = "2006-01-02 15:04:05"
+
+// parseOzoneStart parses an O-Zone start_time; ok is false for empty/"None"/
+// unparseable values (which can't be placed on a timeframe).
+func parseOzoneStart(s string) (time.Time, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" || s == "None" {
+		return time.Time{}, false
+	}
+	t, err := time.Parse(ozoneStartLayout, s)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, true
+}
+
+// Collect pulls games from central's failover store into the local cache for the
+// window [from, to] (zero bounds are open-ended), skipping games already cached.
+// It only reads from central and writes to disk — it never touches the O-Zone
+// print server, so it is safe to run during a live game. Returns a summary.
+func (a *App) Collect(from, to time.Time) (map[string]any, error) {
+	if a.store == nil {
+		return nil, fmt.Errorf("cache is disabled on this agent")
+	}
+	if !a.collectBusy.CompareAndSwap(false, true) {
+		return nil, fmt.Errorf("a collect is already running")
+	}
+	defer a.collectBusy.Store(false)
+
+	metas, err := a.pusher.FetchOzoneGameMeta()
+	if err != nil {
+		return nil, fmt.Errorf("fetch game list from central: %w", err)
+	}
+
+	filtering := !from.IsZero() || !to.IsZero()
+	var collected, already, outOfRange, failed int
+	for _, m := range metas {
+		if filtering {
+			t, ok := parseOzoneStart(m.StartTime)
+			if !ok || (!from.IsZero() && t.Before(from)) || (!to.IsZero() && t.After(to)) {
+				outOfRange++
+				continue
+			}
+		}
+		if a.store.HasRaw(m.GameNumber) {
+			already++
+			continue
+		}
+		raw, ok, err := a.pusher.FetchOzoneGameRaw(m.GameNumber)
+		if err != nil || !ok {
+			failed++
+			continue
+		}
+		sm := store.GameMeta{
+			GameNumber:  m.GameNumber,
+			GameName:    m.GameName,
+			GameType:    m.GameType,
+			Duration:    m.Duration,
+			StartTime:   m.StartTime,
+			EndTime:     m.EndTime,
+			PlayerCount: m.PlayerCount,
+			Valid:       m.Valid,
+		}
+		_ = a.store.UpsertListEntry(sm)
+		if err := a.store.StoreGame(sm, raw); err != nil {
+			failed++
+			continue
+		}
+		collected++
+	}
+
+	log.Printf("[agent] collect: %d collected, %d already cached, %d out of range, %d failed (central had %d)",
+		collected, already, outOfRange, failed, len(metas))
+	return map[string]any{
+		"collected":      collected,
+		"already_cached": already,
+		"out_of_range":   outOfRange,
+		"failed":         failed,
+		"central_total":  len(metas),
+	}, nil
 }
 
 // upsertListEntry records the metadata from one O-Zone game-list element (the
