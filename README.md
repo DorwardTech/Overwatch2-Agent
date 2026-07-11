@@ -56,6 +56,28 @@ curl -i -X POST "$CENTRAL_API_URL" \
 # expect: {"status":"ok","accepted":1}
 ```
 
+## Control panel
+
+When the cache/proxy is enabled, set `ADMIN_API_ADDR` (e.g. `0.0.0.0:8097`) and
+`ADMIN_API_TOKEN` to expose a small browser control panel plus a JSON API. Open
+`http://<agent-host>:8097/` in a browser, enter the admin token, and you get
+buttons to view the agent's status, list cached games (and their raw payloads),
+trigger an idle-gated **resync**, or **purge** the cache — no curl needed.
+
+The page itself holds no secret; the token you type is verified against the API
+and sent as a bearer header on each action. Keep the admin port on the **venue
+LAN only** — never expose it publicly. The JSON API is also available directly:
+
+| Method | Path | |
+|---|---|---|
+| `GET` | `/api/overview` | status snapshot |
+| `GET` | `/api/games` | cached game metadata |
+| `GET` | `/api/games/{n}` | verbatim O-Zone payload for game `n` |
+| `POST` | `/api/resync` | idle-gated cache refresh |
+| `POST` | `/api/purge` | drop all cached games |
+
+All `/api/*` calls require `Authorization: Bearer <ADMIN_API_TOKEN>`.
+
 ## Health
 
 The agent serves a health endpoint on `HEALTH_ADDR` and the binary supports a

@@ -1,9 +1,11 @@
-// Package adminapi is the agent's token-protected control/observability HTTP API.
+// Package adminapi is the agent's token-protected control/observability HTTP API,
+// plus a tiny browser control panel so venue staff can drive it without curl.
 // Unlike the print-server proxy (which must stay unauthenticated for TORN), every
-// route here requires a bearer token, since it can mutate the cache.
+// /api route requires a bearer token, since it can mutate the cache.
 //
 // Routes:
 //
+//	GET  /                  static control-panel page (no secret; JS sends the token)
 //	GET  /api/overview      cache + game-state summary
 //	GET  /api/games         cached game metadata
 //	GET  /api/games/{n}     verbatim "all" payload for one game
@@ -14,6 +16,7 @@ package adminapi
 import (
 	"context"
 	"crypto/subtle"
+	_ "embed"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -22,6 +25,14 @@ import (
 
 	"overwatch/agent/internal/store"
 )
+
+// uiHTML is the self-contained control panel served at "/". It holds no secret:
+// the operator types the admin token, it's verified against /api/overview, and
+// it's sent as the bearer header on every action (the only browser-safe way to
+// gate a served page — a plain navigation can't set an Authorization header).
+//
+//go:embed ui.html
+var uiHTML []byte
 
 // Backend is the subset of the agent the admin API needs.
 type Backend interface {
@@ -70,12 +81,33 @@ func (s *Server) Close() error {
 
 func (s *Server) routes() http.Handler {
 	mux := http.NewServeMux()
+	// The JSON API stays bearer-gated. The UI shell at "/" is served without auth
+	// (it contains no secret) so a browser can load it; its buttons then call the
+	// gated /api/* routes with the token the operator typed in.
+	mux.Handle("/api/", s.auth(s.apiRoutes()))
+	mux.HandleFunc("GET /{$}", s.handleUI)
+	return mux
+}
+
+func (s *Server) apiRoutes() http.Handler {
+	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/overview", s.handleOverview)
 	mux.HandleFunc("GET /api/games", s.handleGames)
 	mux.HandleFunc("GET /api/games/{n}", s.handleGame)
 	mux.HandleFunc("POST /api/resync", s.handleResync)
 	mux.HandleFunc("POST /api/purge", s.handlePurge)
-	return s.auth(mux)
+	return mux
+}
+
+// handleUI serves the static control panel. No auth: it embeds no secret and
+// only calls the (authenticated) /api routes with a token the user provides.
+func (s *Server) handleUI(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	// Everything is inline and same-origin; forbid any external fetch/script.
+	w.Header().Set("Content-Security-Policy",
+		"default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	_, _ = w.Write(uiHTML)
 }
 
 // auth enforces a bearer token on every route in constant time.

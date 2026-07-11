@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"overwatch/agent/internal/store"
@@ -102,6 +103,41 @@ func TestResyncAndPurge(t *testing.T) {
 	}
 	if b.purged != 1 {
 		t.Errorf("purge not invoked")
+	}
+}
+
+func TestControlPanelServedWithoutAuth(t *testing.T) {
+	s, _ := newServer()
+	h := s.Handler()
+
+	// The page must load with NO token (a browser navigation can't set a bearer
+	// header) — the gating happens client-side once the operator types the token.
+	rec := do(t, h, "GET", "/", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET / status = %d, want 200", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Errorf("GET / content-type = %q, want text/html", ct)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(strings.ToLower(body), "<!doctype html>") {
+		t.Error("GET / did not return the control-panel HTML")
+	}
+	// Critical: the served shell must never embed the admin token.
+	if strings.Contains(body, "secret") {
+		t.Error("control-panel HTML leaks the admin token")
+	}
+}
+
+func TestAPIStillGatedAfterUIAdded(t *testing.T) {
+	s, _ := newServer()
+	h := s.Handler()
+
+	if rec := do(t, h, "GET", "/api/overview", ""); rec.Code != http.StatusUnauthorized {
+		t.Errorf("api without token = %d, want 401", rec.Code)
+	}
+	if rec := do(t, h, "GET", "/api/overview", "secret"); rec.Code != http.StatusOK {
+		t.Errorf("api with token = %d, want 200", rec.Code)
 	}
 }
 
