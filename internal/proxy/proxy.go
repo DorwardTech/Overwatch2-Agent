@@ -23,6 +23,16 @@ import (
 	"overwatch/agent/internal/ozoneproto"
 )
 
+// bannerGap separates the two connect-banner frames. TORN's O-Zone connector
+// (Torn5/OZone.cs ReadFromOzone) does NOT delimit pushed frames by length — it
+// reads until a chunk ends with '}' and then stops only if no more data is
+// immediately available (a ~1ms DataAvailable poll). If the two banner frames
+// arrive coalesced, TORN's first read swallows BOTH and its second read blocks
+// forever, hanging the client on "connecting". Real O-Zone emits them with a
+// natural gap; this reproduces it. 50ms is imperceptible (once per connection)
+// and safely exceeds TORN's poll.
+const bannerGap = 50 * time.Millisecond
+
 // Server is the print-server proxy.
 type Server struct {
 	cache  *cache.Cache
@@ -123,8 +133,13 @@ func (s *Server) handle(conn net.Conn) {
 		_ = tcp.SetKeepAlivePeriod(time.Minute)
 	}
 
-	// Push the 2-frame connect banner before answering any command.
-	for _, frame := range s.banner {
+	// Push the 2-frame connect banner before answering any command. The frames
+	// must be spaced apart (bannerGap): TORN delimits them by a no-more-data gap,
+	// not by length, so coalesced frames hang its connect (see bannerGap).
+	for i, frame := range s.banner {
+		if i > 0 {
+			time.Sleep(bannerGap)
+		}
 		if _, err := conn.Write(ozoneproto.Frame(frame)); err != nil {
 			return
 		}

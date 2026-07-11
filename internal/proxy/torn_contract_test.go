@@ -3,9 +3,12 @@ package proxy
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"strings"
 	"testing"
 	"time"
+
+	"overwatch/agent/internal/ozoneproto"
 )
 
 // This file reconstructs Torn5's O-Zone parser (Torn5/OZone.cs) in Go and asserts
@@ -180,6 +183,78 @@ func asString(v any) string {
 		return fmt.Sprintf("%d", int(s))
 	default:
 		return ""
+	}
+}
+
+// tornReadFromOzone reconstructs Torn5/OZone.cs ReadFromOzone (lines 120-152):
+// read 128-byte chunks; when a chunk ends with '}', pause ~1ms and stop only if
+// no more data is immediately available (DataAvailable) — otherwise keep reading.
+// This is the fragile, timing-based frame delimiter the real TORN uses, so the
+// proxy MUST space its two pushed banner frames apart or the FIRST call here
+// swallows both and the caller's SECOND call blocks forever (hang on connect).
+func tornReadFromOzone(t *testing.T, conn net.Conn) []byte {
+	t.Helper()
+	var buf []byte
+	chunk := make([]byte, 128)
+	for {
+		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		n, err := conn.Read(chunk)
+		if err != nil {
+			t.Fatalf("torn read: %v", err)
+		}
+		buf = append(buf, chunk[:n]...)
+		if n > 0 && chunk[n-1] == '}' {
+			time.Sleep(time.Millisecond) // OZone.cs Thread.Sleep(1)
+			// Emulate NetworkStream.DataAvailable: a short read that times out
+			// means no more data (frame boundary). bannerGap (50ms) >> 15ms, so
+			// at a real boundary this reliably times out; mid-frame the rest is
+			// already buffered locally and returns at once (kept, as TORN would).
+			_ = conn.SetReadDeadline(time.Now().Add(15 * time.Millisecond))
+			one := make([]byte, 1)
+			m, perr := conn.Read(one)
+			if m > 0 {
+				buf = append(buf, one[:m]...)
+				continue
+			}
+			if ne, ok := perr.(net.Error); ok && ne.Timeout() {
+				return buf
+			}
+			t.Fatalf("torn peek: %v", perr)
+		}
+	}
+}
+
+// The connect banner must reach TORN as TWO separate frames. TORN reads the
+// banner with tornReadFromOzone twice (OZone.cs Connect); if the proxy sends the
+// frames coalesced, the first read swallows both and TORN hangs on connect. Each
+// read here must therefore return exactly one framed banner ([len][0x28]{json}).
+func TestTornBannerFramesArriveSeparately(t *testing.T) {
+	p, _ := startProxy(t)
+	conn, err := net.DialTimeout("tcp", p.Addr(), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	assertOneBannerFrame(t, "first banner read", tornReadFromOzone(t, conn))
+	assertOneBannerFrame(t, "second banner read", tornReadFromOzone(t, conn))
+}
+
+// assertOneBannerFrame checks raw is exactly one frame: a 5-byte header
+// ([4-byte length][0x28]) followed by a single JSON object with no trailing
+// bytes. Two coalesced frames leave a second [len][0x28]{...} after the first
+// object, which fails the single-object JSON decode.
+func assertOneBannerFrame(t *testing.T, label string, raw []byte) {
+	t.Helper()
+	if len(raw) < ozoneproto.HeaderSize+2 {
+		t.Fatalf("%s: too short (%d bytes) — banner frame missing", label, len(raw))
+	}
+	if raw[4] != ozoneproto.TokenByte {
+		t.Fatalf("%s: missing 0x28 token at byte 5 (got 0x%x)", label, raw[4])
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(raw[ozoneproto.HeaderSize:], &obj); err != nil {
+		t.Fatalf("%s: not exactly one JSON frame — the reader swallowed a second frame (proxy sent banner coalesced): %v", label, err)
 	}
 }
 
