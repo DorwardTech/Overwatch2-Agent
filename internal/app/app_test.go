@@ -42,12 +42,18 @@ func TestGameInProgressNeverSafe(t *testing.T) {
 }
 
 func TestIsResultsCommand(t *testing.T) {
-	for _, typ := range []string{"refetch_game", "backfill_all", "resync_all"} {
+	// cache_resync hits the print server, so it must be idle-gated like the
+	// other results commands.
+	for _, typ := range []string{"refetch_game", "backfill_all", "resync_all", "cache_resync"} {
 		if !isResultsCommand(typ) {
 			t.Errorf("%q should be a results command", typ)
 		}
 	}
-	if isResultsCommand("reboot_agent") {
-		t.Error("reboot_agent is not a results command")
+	// agent_overview and cache_purge are local-only (no print-server access),
+	// so they must stay safe to run during a live game.
+	for _, typ := range []string{"reboot_agent", "agent_overview", "cache_purge"} {
+		if isResultsCommand(typ) {
+			t.Errorf("%q is not a results command", typ)
+		}
 	}
 }

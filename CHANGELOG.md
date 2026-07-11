@@ -8,6 +8,12 @@ The Site Agent and central Overwatch are versioned independently.
 
 ## [Unreleased]
 
+### Fixed
+
+- Restore the central-dispatched cache commands (status refresh, cache resync,
+  cache purge) that had been dropped in an earlier refactor, so operating an
+  agent from Overwatch works again.
+
 ## [1.0.0] — 2026-07-11
 
 Initial release.
