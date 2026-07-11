@@ -51,6 +51,10 @@ type Config struct {
 	AdminAddr       string // admin API bind address ("" disables it)
 	AdminToken      string // bearer token required by the admin API
 
+	// PublicDocsBase is the base URL of the Overwatch-hosted public docs. The
+	// control panel links to <base>/agent/changelog and <base>/agent/api.
+	PublicDocsBase string
+
 	FailoverEnabled bool // back up cached games to central, and restore on cold start
 }
 
@@ -92,6 +96,7 @@ func Load() (Config, error) {
 		ProxyListenAddr: env("PROXY_LISTEN_ADDR", "0.0.0.0:12123"),
 		AdminAddr:       env("ADMIN_API_ADDR", ""),
 		AdminToken:      os.Getenv("ADMIN_API_TOKEN"),
+		PublicDocsBase:  env("PUBLIC_DOCS_BASE", "https://ow2.lasertag.net.au"),
 
 		FailoverEnabled: envBool("ENABLE_CENTRAL_FAILOVER", true),
 	}

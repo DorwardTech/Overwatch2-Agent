@@ -239,7 +239,11 @@ func (a *App) Run(ctx context.Context) {
 	}
 	// Token-protected admin/control API (only if both address and token are set).
 	if a.cfg.AdminAddr != "" && a.cfg.AdminToken != "" {
-		admin := adminapi.New(a, a.cfg.AdminAddr, a.cfg.AdminToken)
+		var links adminapi.Links
+		if base := strings.TrimRight(a.cfg.PublicDocsBase, "/"); base != "" {
+			links = adminapi.Links{Changelog: base + "/agent/changelog", APIDocs: base + "/agent/api"}
+		}
+		admin := adminapi.New(a, a.cfg.AdminAddr, a.cfg.AdminToken, links)
 		_ = admin.Start()
 		defer admin.Close()
 	} else if a.cfg.AdminAddr != "" {

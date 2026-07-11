@@ -43,7 +43,10 @@ func newServer() (*Server, *fakeBackend) {
 		games: []store.GameMeta{{GameNumber: 9, GameName: "TDM", Valid: 1}},
 		raw:   map[int][]byte{9: []byte(`{"game":{"gamenum":9}}`)},
 	}
-	return New(b, ":0", "secret"), b
+	return New(b, ":0", "secret", Links{
+		Changelog: "https://ow2.example/agent/changelog",
+		APIDocs:   "https://ow2.example/agent/api",
+	}), b
 }
 
 func do(t *testing.T, h http.Handler, method, path, token string) *httptest.ResponseRecorder {
@@ -135,6 +138,14 @@ func TestControlPanelServedWithoutAuth(t *testing.T) {
 	// Critical: the served shell must never embed the admin token.
 	if strings.Contains(body, "secret") {
 		t.Error("control-panel HTML leaks the admin token")
+	}
+	// The doc links are injected (placeholder replaced with real URLs).
+	if strings.Contains(body, "__OW_DOCS__") {
+		t.Error("doc-links placeholder was not replaced")
+	}
+	if !strings.Contains(body, "https://ow2.example/agent/changelog") ||
+		!strings.Contains(body, "https://ow2.example/agent/api") {
+		t.Error("control panel did not inject the public doc URLs")
 	}
 }
 

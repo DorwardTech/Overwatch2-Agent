@@ -20,7 +20,11 @@
   header { display: flex; align-items: baseline; gap: 10px; margin-bottom: 20px; }
   header h1 { font-size: 18px; margin: 0; font-weight: 650; letter-spacing: .2px; }
   header .over { color: var(--content); } header .watch { color: var(--brand); }
-  header .sub { color: var(--faint); font-size: 12px; margin-left: auto; }
+  header .hdr-right { margin-left: auto; display: flex; align-items: center; gap: 14px; }
+  header .sub { color: var(--faint); font-size: 12px; }
+  a.doclink { color: var(--muted); font-size: 12.5px; text-decoration: none; font-weight: 550; }
+  a.doclink:hover { color: var(--brand); }
+  a.doclink::after { content: " \2197"; font-size: 10px; opacity: .7; }
   .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 18px; margin-bottom: 16px; }
   .card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .6px; color: var(--faint); margin: 0 0 14px; font-weight: 600; }
   label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
@@ -61,12 +65,17 @@
   #toast.err { border-color: var(--crit); color: var(--crit); }
   .note { font-size: 12px; color: var(--faint); margin-top: 10px; }
 </style>
+<script>window.OW_DOCS = __OW_DOCS__;</script>
 </head>
 <body>
 <div class="wrap">
   <header>
     <h1><span class="over">OVER</span><span class="watch">WATCH</span> · Agent</h1>
-    <span class="sub" id="host"></span>
+    <div class="hdr-right">
+      <a id="lnkChangelog" class="doclink" target="_blank" rel="noopener noreferrer" hidden>Changelog</a>
+      <a id="lnkApi" class="doclink" target="_blank" rel="noopener noreferrer" hidden>API docs</a>
+      <span class="sub" id="host"></span>
+    </div>
   </header>
 
   <!-- Token gate -->
@@ -138,6 +147,12 @@
   let token = sessionStorage.getItem(KEY) || "";
   const $ = (id) => document.getElementById(id);
   document.getElementById("host").textContent = location.host;
+
+  // Public documentation links (changelog + API reference), hosted on Overwatch
+  // and injected by the agent. Shown even before unlock, since they're public.
+  var docs = window.OW_DOCS || {};
+  if (docs.changelog) { var lc = $("lnkChangelog"); lc.href = docs.changelog; lc.hidden = false; }
+  if (docs.api) { var la = $("lnkApi"); la.href = docs.api; la.hidden = false; }
 
   function toast(msg, isErr) {
     const t = $("toast");

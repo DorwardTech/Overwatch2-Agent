@@ -15,6 +15,7 @@
 package adminapi
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	_ "embed"
@@ -49,17 +50,26 @@ type Backend interface {
 	Collect(from, to time.Time) (map[string]any, error)
 }
 
+// Links are the public documentation URLs the control panel links to (hosted on
+// Overwatch). Empty fields hide their button.
+type Links struct {
+	Changelog string
+	APIDocs   string
+}
+
 // Server hosts the admin API.
 type Server struct {
 	backend Backend
 	token   string
 	addr    string
+	links   Links
 	srv     *http.Server
 }
 
-// New creates an admin API for backend, bound to addr, requiring token.
-func New(backend Backend, addr, token string) *Server {
-	s := &Server{backend: backend, token: token, addr: addr}
+// New creates an admin API for backend, bound to addr, requiring token. links
+// are surfaced as buttons in the control panel.
+func New(backend Backend, addr, token string, links Links) *Server {
+	s := &Server{backend: backend, token: token, addr: addr, links: links}
 	s.srv = &http.Server{Addr: addr, Handler: s.routes(), ReadHeaderTimeout: 5 * time.Second}
 	return s
 }
@@ -114,7 +124,23 @@ func (s *Server) handleUI(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Security-Policy",
 		"default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	_, _ = w.Write(uiHTML)
+	_, _ = w.Write(s.page())
+}
+
+// page injects the public documentation URLs into the control-panel shell.
+func (s *Server) page() []byte {
+	docs := map[string]string{}
+	if s.links.Changelog != "" {
+		docs["changelog"] = s.links.Changelog
+	}
+	if s.links.APIDocs != "" {
+		docs["api"] = s.links.APIDocs
+	}
+	b, err := json.Marshal(docs)
+	if err != nil {
+		b = []byte("null")
+	}
+	return bytes.Replace(uiHTML, []byte("__OW_DOCS__"), b, 1)
 }
 
 // auth enforces a bearer token on every route in constant time.
