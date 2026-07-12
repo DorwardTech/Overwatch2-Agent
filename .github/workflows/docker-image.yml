@@ -64,7 +64,7 @@ jobs:
           # Stamp the binary's reported version: the git tag's semver on a
           # tagged release, otherwise the Dockerfile's release default.
           build-args: |
-            AGENT_VERSION=${{ startsWith(github.ref, 'refs/tags/') && steps.meta.outputs.version || '1.0.1' }}
+            AGENT_VERSION=${{ startsWith(github.ref, 'refs/tags/') && steps.meta.outputs.version || '1.0.2' }}
           # Keep the manifest list clean (one entry per arch, no "unknown/unknown"
           # provenance entries that confuse some ARM runtimes / imagetools).
           provenance: false

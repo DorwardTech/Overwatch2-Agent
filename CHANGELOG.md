@@ -6,6 +6,13 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 The Site Agent and central Overwatch are versioned independently.
 
+## [1.0.2] — 2026-07-12
+
+### Fixed
+
+- Defensively bound an outgoing print-server frame's payload to `MaxPayload`, so
+  the length always fits the 32-bit header field (parity with central).
+
 ## [1.0.1] — 2026-07-12
 
 ### Fixed
@@ -18,8 +25,6 @@ The Site Agent and central Overwatch are versioned independently.
   to it, both publish workflows stamp a clean SemVer, and an `AGENT_VERSION`
   environment variable overrides the reported version on an already-built image
   without a rebuild.
-- Defensively bound an outgoing print-server frame's payload to `MaxPayload`, so
-  the length always fits the 32-bit header field (parity with central).
 
 ## [1.0.0] — 2026-07-11
 
