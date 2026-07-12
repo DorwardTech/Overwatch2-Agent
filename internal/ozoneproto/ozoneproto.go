@@ -21,9 +21,16 @@ const (
 )
 
 // Frame wraps a JSON payload in the 5-byte header: little-endian length + 0x28.
+// Payloads are bounded by MaxPayload, so the length always fits the uint32 header
+// field; an over-size payload (never expected in practice) is capped defensively
+// rather than overflowing the length.
 func Frame(payload []byte) []byte {
-	out := make([]byte, HeaderSize+len(payload))
-	binary.LittleEndian.PutUint32(out[:4], uint32(len(payload)))
+	if len(payload) > MaxPayload {
+		payload = payload[:MaxPayload]
+	}
+	n := len(payload) // 0 <= n <= MaxPayload, so it fits in uint32
+	out := make([]byte, HeaderSize+n)
+	binary.LittleEndian.PutUint32(out[:4], uint32(n))
 	out[4] = TokenByte
 	copy(out[HeaderSize:], payload)
 	return out
