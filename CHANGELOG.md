@@ -6,16 +6,18 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 The Site Agent and central Overwatch are versioned independently.
 
-## [Unreleased]
+## [1.0.1] — 2026-07-12
 
 ### Fixed
 
 - Restore the central-dispatched cache commands (status refresh, cache resync,
   cache purge) that had been dropped in an earlier refactor, so operating an
   agent from Overwatch works again.
-- Published container images now report the real release version instead of
-  `dev`: the Docker build defaults the version to the current release and the
-  release workflow stamps the git tag's version onto tagged builds.
+- The agent no longer reports its version as `dev`. Every build path now stamps
+  the real release version — the standalone and monorepo Docker builds default
+  to it, both publish workflows stamp a clean SemVer, and an `AGENT_VERSION`
+  environment variable overrides the reported version on an already-built image
+  without a rebuild.
 
 ## [1.0.0] — 2026-07-11
 
