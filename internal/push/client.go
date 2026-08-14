@@ -18,6 +18,7 @@ type Pusher struct {
 	resultsURL  string // post-game results URL (derived from the ingest URL)
 	commandsURL string // command-queue URL (derived from the ingest URL)
 	ozoneURL    string // verbatim cache failover URL (derived from the ingest URL)
+	packIRURL   string // pack IR emitter-strength URL (derived from the ingest URL)
 	token       string
 	client      *http.Client
 }
@@ -69,6 +70,7 @@ func New(ingestURL, token string) *Pusher {
 		resultsURL:  deriveURL(ingestURL, "game-results"),
 		commandsURL: deriveURL(ingestURL, "commands"),
 		ozoneURL:    deriveURL(ingestURL, "ozone-games"),
+		packIRURL:   deriveURL(ingestURL, "pack-ir"),
 		token:       token,
 		client: &http.Client{
 			Timeout: 15 * time.Second,
@@ -89,6 +91,13 @@ func deriveURL(ingestURL, endpoint string) string {
 // Push POSTs a JSON telemetry batch. The idempotencyKey lets central dedupe retries.
 func (p *Pusher) Push(payload []byte, idempotencyKey string) error {
 	return p.post(p.url, payload, idempotencyKey)
+}
+
+// PushPackIR POSTs a batch of IR emitter-strength readings to central. The
+// idempotencyKey (the push_seq) lets central dedupe retries. payload is the
+// pre-built {push_seq, readings, agent} envelope so it round-trips the buffer.
+func (p *Pusher) PushPackIR(payload []byte, idempotencyKey string) error {
+	return p.post(p.packIRURL, payload, idempotencyKey)
 }
 
 // PushGameResults POSTs one completed game's raw O-Zone data to central.

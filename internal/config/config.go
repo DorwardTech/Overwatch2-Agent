@@ -28,6 +28,12 @@ type Config struct {
 	BufferMax        int
 	BufferFile       string // spill unsent telemetry here across restarts ("" disables)
 
+	// Pack IR bench listener: an on-prem calibration node POSTs emitter-strength
+	// readings here over the LAN and the agent forwards them to central. Bind
+	// LAN-only and never port-forward it (unauthenticated, like the proxy).
+	PackIRAddr       string // pack-IR listener bind ("" disables)
+	PackIRBufferFile string // spill unsent IR readings here across restarts ("" disables)
+
 	// Mode selects the data source. "ozone" (default) polls the O-Zone WS/print
 	// server; "legacy" polls a P&C Micros Nexus site via its MySQL DB + on-box
 	// management app.
@@ -76,6 +82,9 @@ func Load() (Config, error) {
 		HealthAddr:       env("HEALTH_ADDR", ":8088"),
 		BufferMax:        envInt("BUFFER_MAX", 2000),
 		BufferFile:       env("BUFFER_FILE", ""),
+
+		PackIRAddr:       env("PACK_IR_ADDR", ""),
+		PackIRBufferFile: env("PACK_IR_BUFFER_FILE", ""),
 
 		Mode:             env("AGENT_MODE", "ozone"),
 		NexusDSN:         os.Getenv("NEXUS_DSN"),
