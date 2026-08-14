@@ -15,6 +15,7 @@ import (
 	"overwatch/agent/internal/legacy/lasertag"
 	"overwatch/agent/internal/legacy/nexus"
 	"overwatch/agent/internal/legacy/translate"
+	"overwatch/agent/internal/packir"
 	"overwatch/agent/internal/push"
 )
 
@@ -84,6 +85,16 @@ func newWithDeps(cfg config.Config, db nexusDB, lt lasertagAPI, p pusher) *App {
 // Run drives the poll loops until the context is cancelled.
 func (a *App) Run(ctx context.Context) {
 	go a.health.Serve(a.cfg.HealthAddr)
+
+	// Optional LAN pack-IR bench listener (independent of the Nexus poll loop).
+	if a.cfg.PackIRAddr != "" {
+		pir := packir.New(a.cfg.PackIRAddr, a.cfg.Version, push.New(a.cfg.CentralURL, a.cfg.Token), a.cfg.BufferMax, a.cfg.PackIRBufferFile)
+		if err := pir.Start(ctx); err != nil {
+			log.Printf("[legacy] pack-IR listener failed to start: %v", err)
+		} else {
+			defer pir.Close()
+		}
+	}
 
 	if roster, err := a.db.Roster(ctx); err != nil {
 		log.Printf("[legacy] roster load failed (aliases will be blank until it recovers): %v", err)

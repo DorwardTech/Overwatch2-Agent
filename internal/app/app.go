@@ -22,6 +22,7 @@ import (
 	"overwatch/agent/internal/health"
 	"overwatch/agent/internal/msgbus"
 	"overwatch/agent/internal/ozone"
+	"overwatch/agent/internal/packir"
 	"overwatch/agent/internal/proxy"
 	"overwatch/agent/internal/push"
 	"overwatch/agent/internal/results"
@@ -90,10 +91,11 @@ type App struct {
 	collectBusy  atomic.Bool          // single-flight for a "collect from central" run
 	stopRun      context.CancelFunc   // set by Run; requestShutdown cancels it (graceful reboot)
 
-	store *store.Store   // local verbatim game cache (nil if disabled/unavailable)
-	cache *cache.Cache   // O-Zone-shaped view over the store
-	bus   *msgbus.Client // External Message Bus consumer
-	proxy *proxy.Server  // transparent print-server proxy (TORN connects here)
+	store  *store.Store   // local verbatim game cache (nil if disabled/unavailable)
+	cache  *cache.Cache   // O-Zone-shaped view over the store
+	bus    *msgbus.Client // External Message Bus consumer
+	proxy  *proxy.Server  // transparent print-server proxy (TORN connects here)
+	packir *packir.Server // LAN pack-IR bench listener + forwarder (nil if disabled)
 }
 
 func New(cfg config.Config) *App {
@@ -118,6 +120,12 @@ func New(cfg config.Config) *App {
 		} else if n > 0 {
 			log.Printf("[agent] buffer: restored %d unsent batch(es) from %s", n, cfg.BufferFile)
 		}
+	}
+
+	// Optional LAN pack-IR bench listener (independent of O-Zone). Created here
+	// (not in Run) so Overview can read it without a data race.
+	if cfg.PackIRAddr != "" {
+		a.packir = packir.New(cfg.PackIRAddr, cfg.Version, a.pusher, cfg.BufferMax, cfg.PackIRBufferFile)
 	}
 
 	if cfg.CacheEnabled {
@@ -177,6 +185,9 @@ func (a *App) Overview() map[string]any {
 	if a.proxy != nil {
 		overview["proxy_connections"] = a.proxy.Connections()
 		overview["proxy_served"] = a.proxy.Served()
+	}
+	if a.packir != nil {
+		overview["pack_ir"] = a.packir.Status()
 	}
 	return overview
 }
@@ -248,6 +259,13 @@ func (a *App) Run(ctx context.Context) {
 		defer admin.Close()
 	} else if a.cfg.AdminAddr != "" {
 		log.Print("[agent] admin API not started: ADMIN_API_TOKEN is required")
+	}
+
+	// LAN pack-IR bench listener: forwards emitter-strength readings to central,
+	// buffering on outage. Runs regardless of whether O-Zone connects.
+	if a.packir != nil {
+		_ = a.packir.Start(ctx)
+		defer a.packir.Close()
 	}
 
 	backoff := time.Second

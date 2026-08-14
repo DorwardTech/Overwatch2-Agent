@@ -6,6 +6,20 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 The Site Agent and central Overwatch are versioned independently.
 
+## [1.1.0] — 2026-07-14
+
+### Added
+
+- **Pack IR bench listener + forwarder.** A new LAN-only, unauthenticated
+  endpoint `POST /local/pack-ir` accepts IR emitter-strength readings from an
+  on-prem calibration node and forwards them to central, buffering across
+  outages (with disk spill across restarts) exactly like telemetry. Malformed
+  readings are rejected at the edge so a bad reading can't poison the forward
+  queue; pack identity is carried explicitly in the payload. Enabled with
+  `PACK_IR_ADDR`; runs in both agent modes as an independent local telemetry
+  source, separate from the print-server path, and its status appears in the
+  admin overview.
+
 ## [1.0.2] — 2026-07-12
 
 ### Fixed
