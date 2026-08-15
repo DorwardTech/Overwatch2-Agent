@@ -6,6 +6,26 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 The Site Agent and central Overwatch are versioned independently.
 
+## [1.1.1] — 2026-08-15
+
+### Fixed
+
+- **The standalone deployment kept no persistent storage**, so every restart
+  was a cold start. `docker-compose.yml` declared no volume at all while the
+  container filesystem is read-only, which meant the game cache and the
+  unsent-telemetry spill had nowhere to live. Two consequences at venues: any
+  telemetry buffered during an outage was silently discarded on the next
+  restart or upgrade, and the agent re-downloaded its **entire** game cache
+  from Overwatch on every redeploy — hundreds of requests that exhaust the
+  per-site rate limit and stall live telemetry for as long as it takes to
+  finish. The compose file now mounts a persistent volume and pins the cache
+  and buffer paths to it, matching the deployment the fleet has been using.
+- The reported version is correct again. Bumping it in the source was not
+  enough: every image build stamps the version over the top, and the build
+  paths still carried the previous release, so agents kept reporting 1.0.2
+  after the 1.1.0 release. All build paths now agree, and CI fails if they
+  ever drift from the source again.
+
 ## [1.1.0] — 2026-07-14
 
 ### Added
