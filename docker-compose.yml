@@ -7,16 +7,46 @@
 # uncomment `image` below.
 services:
   agent:
-    build: .
-    # image: ghcr.io/OWNER/overwatch-agent:latest
+    build:
+      context: .
+      args:
+        # Stamp the built binary's version so it never reports "dev".
+        AGENT_VERSION: ${AGENT_VERSION:-1.1.1}
+    # image: ghcr.io/dorwardtech/overwatch2-agent:latest
     restart: unless-stopped
     env_file: .env
     environment:
       HEALTH_ADDR: ':8088'
+      # These two MUST point at the mounted volume below, so they are set here
+      # rather than in .env — the rootfs is read-only, and anything written
+      # outside /data is lost when the container is recreated.
+      #
+      # Without them the agent cold-starts empty on every redeploy: it re-pulls
+      # the whole failover cache from central (hundreds of requests, which
+      # exhausts the per-agent rate limit and stalls live telemetry), and any
+      # telemetry buffered during an outage is silently dropped.
+      CACHE_DIR: /data/cache
+      BUFFER_FILE: /data/cache/buffer.json
+      # Pack IR bench readings buffered across restarts (only used when
+      # PACK_IR_ADDR is set in .env).
+      PACK_IR_BUFFER_FILE: /data/cache/pack-ir-buffer.json
     # Lets the container reach an O-Zone server running on the Docker host via
     # OZONE_WS_HOST=host.docker.internal (use the LAN IP instead if it's remote).
     extra_hosts:
       - 'host.docker.internal:host-gateway'
+    # Publish the print-server proxy for TORN (only meaningful with
+    # ENABLE_PROXY=true). Defaults to localhost, which is safe; set
+    # PROXY_PUBLISH_ADDR to the venue LAN IP so TORN on another machine can
+    # reach it. NEVER expose it to the public internet. If the real O-Zone
+    # print server already listens on this host's :12123, leave the proxy off
+    # or move this to another port.
+    ports:
+      - '${PROXY_PUBLISH_ADDR:-127.0.0.1}:12123:12123'
+    # The rootfs is read-only, so every writable path the agent needs — the
+    # game cache and the buffer spill files — lives on this volume. It must
+    # persist across restarts and image upgrades.
+    volumes:
+      - agent-cache:/data/cache
     healthcheck:
       test: ['CMD', '/agent', 'healthcheck']
       interval: 30s
@@ -29,3 +59,9 @@ services:
         limits:
           memory: 128m
           cpus: '0.25'
+
+volumes:
+  # Persists the print-server cache and the unsent-telemetry spill across
+  # agent restarts, rebuilds and image upgrades. Do not remove this: without
+  # it a redeploy loses buffered telemetry and triggers a full cache restore.
+  agent-cache:
