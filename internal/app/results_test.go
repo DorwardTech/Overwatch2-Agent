@@ -195,3 +195,88 @@ var errTest = errTestType{}
 type errTestType struct{}
 
 func (errTestType) Error() string { return "simulated fetch failure" }
+
+// A backfill/resync that waited on the results mutex must re-check the idle gate
+// before it dials: the command-queue gate ran before the wait, so a game can
+// have started while we were blocked. Without the re-check the agent connects,
+// drains the handshake and issues "list" during active play.
+func TestSyncGamesDefersWhenGameStartsDuringLockWait(t *testing.T) {
+	a, ps := newSimApp(t)
+
+	// Hold the results mutex, as a mid-flight refreshCache would, and start a
+	// game while syncGames is blocked on it.
+	a.resultsMu.Lock()
+	done := make(chan struct{})
+	var status string
+	var result map[string]any
+	go func() {
+		defer close(done)
+		status, result = a.syncGames(map[string]any{}, true)
+	}()
+
+	// Give the goroutine time to block on the lock, then start a game.
+	time.Sleep(50 * time.Millisecond)
+	a.gameState.Store(stateActive)
+	a.resultsMu.Unlock()
+	<-done
+
+	if status != "deferred" {
+		t.Fatalf("status = %q, want deferred (a game started during the lock wait)", status)
+	}
+	if result["reason"] != "game in progress" {
+		t.Fatalf("result = %v, want a game-in-progress reason", result)
+	}
+	if ps.Connections() != 0 {
+		t.Fatalf("print server must not be contacted during a game (connections=%d)", ps.Connections())
+	}
+}
+
+// The pending-results drain must not run on the poll goroutine. collect() is the
+// only writer of serverMode (and, without the Message Bus, of gameState), so a
+// synchronous drain freezes the very idle signal each queued fetch re-checks:
+// a game starting mid-drain goes unnoticed and the games queued behind it are
+// pulled from the print server during live play.
+func TestCheckGameResultsDrainsOffThePollGoroutine(t *testing.T) {
+	a, ps := newSimApp(t)
+	a.cfg.ResultsEnabled = true
+
+	// Two finished games are queued and the first fetch is slow, so the drain is
+	// still running when the poll loop next reads the server state.
+	ps.AddGame(10, ozonefix.AllResponseJSON())
+	a.queueFetch(9)
+	a.queueFetch(10)
+	fetching := make(chan struct{}, 1)
+	ps.OnRequest(func(cmd string) {
+		if cmd == "all" {
+			select {
+			case fetching <- struct{}{}:
+			default:
+			}
+			time.Sleep(300 * time.Millisecond)
+		}
+	})
+
+	// The poll goroutine's call must return promptly rather than block for the
+	// whole drain (that alone would stall telemetry past the offline window)...
+	returned := make(chan struct{})
+	go func() {
+		defer close(returned)
+		a.checkGameResults(map[string]any{"SERVERMODE": 1, "GAMENUM": 0})
+	}()
+	select {
+	case <-returned:
+	case <-time.After(2 * time.Second):
+		t.Fatal("checkGameResults blocked the poll goroutine for the whole drain")
+	}
+
+	// ...so that the poll loop can still record a game starting while the drain
+	// is in flight. With a synchronous drain this update could not land until
+	// every queued game had already been pulled.
+	<-fetching
+	a.serverMode.Store(6) // what collect() would store on the next poll
+
+	time.Sleep(time.Second)
+	if got := ps.Requests("all"); got != 1 {
+		t.Fatalf("print server received %d 'all' fetches after a game started, want exactly 1", got)
+	}
+}

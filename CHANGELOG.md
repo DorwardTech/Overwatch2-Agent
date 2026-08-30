@@ -6,6 +6,30 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 The Site Agent and central Overwatch are versioned independently.
 
+## [1.1.2] — 2026-08-30
+
+### Fixed
+
+- **A backlog of finished games could be read from the venue's game server
+  during a live game.** The results drain ran on the poll loop — the only place
+  the agent records the game server's current state. While the drain worked
+  through a queue of finished games that state could not be refreshed, so the
+  safety check each fetch performs was reading a frozen signal: if a game
+  started part-way through the drain, the games still queued behind it were
+  fetched anyway, during active play. Back-to-back games with a slow game
+  server is exactly the situation that builds such a backlog. The drain now
+  runs off the poll loop, so the state keeps updating and every queued fetch
+  re-checks a live signal. As a bonus, a slow drain no longer stalls telemetry
+  (which could push a venue past Overwatch's offline threshold and flap the
+  site offline just after a game finished).
+- **A backfill or resync could connect to the game server during a live game.**
+  Those commands are checked for safety when they are picked up, but they then
+  wait for exclusive access to the results interface — a wait that can last
+  tens of seconds behind a cache refresh. A game starting during that wait went
+  unnoticed: the command connected, completed the handshake and requested the
+  game list before its first per-game safety check. It now re-checks immediately
+  before connecting and defers instead, matching the single-game fetch path.
+
 ## [1.1.1] — 2026-08-15
 
 ### Fixed

@@ -89,6 +89,7 @@ type App struct {
 	resultsMu    sync.Mutex           // serialises O-Zone results-API access
 	cmdBusy      atomic.Bool          // single-flight for command processing
 	collectBusy  atomic.Bool          // single-flight for a "collect from central" run
+	fetchBusy    atomic.Bool          // single-flight for a pending-results drain
 	stopRun      context.CancelFunc   // set by Run; requestShutdown cancels it (graceful reboot)
 
 	store  *store.Store   // local verbatim game cache (nil if disabled/unavailable)
@@ -432,15 +433,29 @@ func (a *App) checkGameResults(server map[string]any) {
 		a.queueFetch(finished)
 	}
 
-	// Only ever touch the print server when it's safe to do so.
+	// Only ever touch the print server when it's safe to do so, and run the
+	// drain OFF this goroutine. collect() is the sole writer of serverMode (and,
+	// without the Message Bus, of gameState), so blocking it inside a drain
+	// would freeze the very idle signal every fetch re-checks: a game starting
+	// mid-drain would go unnoticed and the next queued game would be pulled from
+	// the print server during live play. Keeping the poll loop free also stops a
+	// slow drain from stalling telemetry past central's offline window.
 	if a.safeForPrintServer(mode) {
-		a.drainPendingFetches()
+		go a.drainPendingFetches()
 	}
 }
 
 // drainPendingFetches fetches every queued finished game that is due (its
-// per-game backoff has elapsed). Called only from a safe (non-game) server mode.
+// per-game backoff has elapsed). Called only from a safe (non-game) server mode,
+// and never on the poll goroutine (see checkGameResults). Single-flighted, so
+// repeated polls during a long drain can't pile up goroutines; a game queued
+// after the run started is picked up by the next drain.
 func (a *App) drainPendingFetches() {
+	if !a.fetchBusy.CompareAndSwap(false, true) {
+		return // a drain is already in progress
+	}
+	defer a.fetchBusy.Store(false)
+
 	now := time.Now()
 	a.mu.Lock()
 	pending := make([]int, 0, len(a.pendingFetch))
@@ -1047,6 +1062,15 @@ func (a *App) syncGames(payload map[string]any, force bool) (string, map[string]
 
 	a.resultsMu.Lock()
 	defer a.resultsMu.Unlock()
+
+	// processCommands checked the idle gate BEFORE the (potentially long) wait on
+	// resultsMu — a refreshCache holding the lock can run for tens of seconds, so
+	// a game may have started while we blocked here. Re-check before dialling:
+	// every print-server connection is made under a freshly read idle signal,
+	// exactly as pullGameResults does for the per-game path.
+	if !a.safeForPrintServer(int(a.serverMode.Load())) {
+		return "deferred", map[string]any{"reason": "game in progress"}
+	}
 
 	rc, err := results.Dial(a.cfg.OzoneHost, a.cfg.OzoneResultsPort, 5*time.Second)
 	if err != nil {
