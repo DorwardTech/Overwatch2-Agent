@@ -42,7 +42,7 @@ func main() {
 	}()
 
 	if cfg.Mode == "legacy" {
-		log.Printf("[agent] legacy (Nexus) mode: %s + %s", cfg.NexusDSN, cfg.LasertagURL)
+		log.Printf("[agent] legacy (Nexus) mode: %s + %s", config.RedactDSN(cfg.NexusDSN), cfg.LasertagURL)
 		legacy, err := legacyapp.New(cfg)
 		if err != nil {
 			log.Fatalf("[agent] legacy startup error: %v", err)

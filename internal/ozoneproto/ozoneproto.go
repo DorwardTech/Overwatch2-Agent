@@ -39,14 +39,37 @@ func Frame(payload []byte) []byte {
 // ReadFrame reads exactly one framed message from r and returns the JSON payload.
 // It validates the token byte and the length bound.
 func ReadFrame(r io.Reader) ([]byte, error) {
-	header := make([]byte, HeaderSize)
-	if _, err := io.ReadFull(r, header); err != nil {
+	length, err := ReadHeader(r)
+	if err != nil {
 		return nil, err
 	}
+	return ReadBody(r, length)
+}
+
+// ReadHeader reads the 5-byte header and returns the payload length it declares.
+//
+// It is split out from ReadFrame for servers that accept connections from
+// anywhere on the venue LAN: between the header and the body is the only place
+// a reader can apply its own, tighter length cap (a request frame is a few
+// dozen bytes, not the 10 MiB a response may need) and put a deadline on the
+// body without also timing out a client that is simply idle between commands.
+func ReadHeader(r io.Reader) (int, error) {
+	header := make([]byte, HeaderSize)
+	if _, err := io.ReadFull(r, header); err != nil {
+		return 0, err
+	}
 	if header[4] != TokenByte {
-		return nil, fmt.Errorf("ozoneproto: unexpected token byte 0x%x", header[4])
+		return 0, fmt.Errorf("ozoneproto: unexpected token byte 0x%x", header[4])
 	}
 	length := int(binary.LittleEndian.Uint32(header[:4]))
+	if length <= 0 || length > MaxPayload {
+		return 0, fmt.Errorf("ozoneproto: invalid payload length %d", length)
+	}
+	return length, nil
+}
+
+// ReadBody reads exactly length bytes of payload, as declared by ReadHeader.
+func ReadBody(r io.Reader, length int) ([]byte, error) {
 	if length <= 0 || length > MaxPayload {
 		return nil, fmt.Errorf("ozoneproto: invalid payload length %d", length)
 	}

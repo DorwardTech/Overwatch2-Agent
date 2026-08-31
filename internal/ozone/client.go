@@ -10,6 +10,14 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// maxFrame caps a single websocket message. The agent runs in a 128 MB
+// container and gorilla reads a frame into memory before returning it, so
+// without a limit one oversized message from a compromised (or impersonated)
+// O-Zone host is enough to OOM-kill the agent — which skips the graceful spill
+// and drops whatever telemetry was buffered. Real responses are well under a
+// megabyte; 10 MiB matches the bound the print-server framing already applies.
+const maxFrame = 10 << 20
+
 type Client struct {
 	conn *websocket.Conn
 }
@@ -21,6 +29,7 @@ func Dial(host, port string) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
+	conn.SetReadLimit(maxFrame)
 	return &Client{conn: conn}, nil
 }
 

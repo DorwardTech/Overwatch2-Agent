@@ -12,6 +12,7 @@ package proxy
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net"
 	"sync"
@@ -32,6 +33,34 @@ import (
 // natural gap; this reproduces it. 50ms is imperceptible (once per connection)
 // and safely exceeds TORN's poll.
 const bannerGap = 50 * time.Millisecond
+
+// The proxy listens on the venue LAN with no authentication — TORN speaks plain
+// TCP and cannot be changed — so anything on that network can open connections
+// to it. The agent has 128 MB. These three bounds keep an unauthenticated peer,
+// malicious or merely broken, from exhausting it:
+const (
+	// maxConns caps concurrent clients. A venue runs TORN and perhaps a printer;
+	// 64 is far past legitimate use and still bounds the memory the listener can
+	// be made to hold. Being refused is recoverable — TORN reconnects — whereas
+	// an OOM kill takes the agent down and skips the graceful buffer spill,
+	// losing unsent telemetry with it.
+	maxConns = 64
+
+	// maxRequestFrame caps an INBOUND frame. Requests are a few dozen bytes
+	// ({"gamenumber":9,"command":"all"}); the 10 MiB protocol maximum exists for
+	// the responses we send. Without a tighter cap here a client could declare
+	// 10 MiB in the header and then stall, and the proxy would allocate the
+	// whole buffer up front and hold it: about a dozen such connections is the
+	// container.
+	maxRequestFrame = 64 << 10
+
+	// bodyTimeout bounds the wait for a request body once its header has
+	// arrived. It deliberately does NOT apply to the header: a client that has
+	// sent nothing is just idle between games, which is normal and must not be
+	// disconnected. A request body is a few dozen bytes on a LAN, so five
+	// seconds is already orders of magnitude more than one needs.
+	bodyTimeout = 5 * time.Second
+)
 
 // writeTimeout bounds a single write. A peer that has stopped reading — TORN
 // crashed mid-game, or a half-open connection the OS has not yet reaped — fills
@@ -54,11 +83,12 @@ type Server struct {
 	addr   string
 	banner [][]byte
 
-	ln     net.Listener
-	mu     sync.Mutex
-	conns  atomic.Int64 // currently-open connections
-	served atomic.Int64 // total requests answered
-	closed atomic.Bool
+	ln      net.Listener
+	mu      sync.Mutex
+	conns   atomic.Int64 // currently-open connections
+	served  atomic.Int64 // total requests answered
+	refused atomic.Int64 // connections turned away at maxConns
+	closed  atomic.Bool
 }
 
 // New creates a proxy serving from c, binding to addr (e.g. "0.0.0.0:12123").
@@ -105,6 +135,11 @@ func (s *Server) Connections() int64 { return s.conns.Load() }
 // Served returns the total number of requests answered.
 func (s *Server) Served() int64 { return s.served.Load() }
 
+// Refused returns how many connections were turned away at the concurrency cap.
+// A non-zero value means something on the venue LAN is opening far more
+// connections than a scoring client does.
+func (s *Server) Refused() int64 { return s.refused.Load() }
+
 // Close stops the listener.
 func (s *Server) Close() error {
 	s.closed.Store(true)
@@ -127,6 +162,14 @@ func (s *Server) acceptLoop(ln net.Listener) {
 			// game server — log and keep accepting rather than dying silently.
 			log.Printf("[agent] proxy: accept failed: %v (retrying)", err)
 			time.Sleep(200 * time.Millisecond)
+			continue
+		}
+		// Refuse rather than accept-and-hold once the cap is reached: an
+		// accepted connection costs a goroutine and a read buffer, and this
+		// listener is reachable by anything on the venue LAN.
+		if s.conns.Load() >= maxConns {
+			s.refused.Add(1)
+			_ = conn.Close()
 			continue
 		}
 		go s.handle(conn)
@@ -161,7 +204,7 @@ func (s *Server) handle(conn net.Conn) {
 	}
 
 	for {
-		payload, err := ozoneproto.ReadFrame(conn)
+		payload, err := readRequest(conn)
 		if err != nil {
 			return // client closed or framing broke; TORN will reconnect
 		}
@@ -178,6 +221,28 @@ func (s *Server) handle(conn net.Conn) {
 			return
 		}
 	}
+}
+
+// readRequest reads one client request, bounded in size and — once its header
+// has arrived — in time. No deadline covers the wait for the header itself:
+// TORN holds its connection open and idle between games.
+func readRequest(conn net.Conn) ([]byte, error) {
+	length, err := ozoneproto.ReadHeader(conn)
+	if err != nil {
+		return nil, err
+	}
+	if length > maxRequestFrame {
+		return nil, fmt.Errorf("proxy: request frame of %d bytes is too large", length)
+	}
+
+	_ = conn.SetReadDeadline(time.Now().Add(bodyTimeout))
+	body, err := ozoneproto.ReadBody(conn, length)
+	_ = conn.SetReadDeadline(time.Time{}) // idle again: no deadline
+	if err != nil {
+		return nil, err
+	}
+
+	return body, nil
 }
 
 // respond maps one request to its O-Zone reply (see the command table in
