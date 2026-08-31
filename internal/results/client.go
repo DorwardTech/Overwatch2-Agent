@@ -45,7 +45,10 @@ func (c *Client) Drain(frames int, timeout time.Duration) {
 	}
 }
 
-// GameData requests the full data (incl. tagsonl/tagsbyl detail) for one game.
+// GameData requests the full data (incl. tagsonl/tagsbyl detail) for one game,
+// decoded. The agent itself always fetches through GameDataRaw: the cache must
+// hold the bytes O-Zone sent, and a decode/re-encode round trip does not
+// preserve them. Use this only where a decoded map is the point.
 func (c *Client) GameData(gameNumber int, timeout time.Duration) (map[string]any, error) {
 	if err := c.send(map[string]any{"gamenumber": gameNumber, "command": "all"}, timeout); err != nil {
 		return nil, err
@@ -53,7 +56,8 @@ func (c *Client) GameData(gameNumber int, timeout time.Duration) (map[string]any
 	return c.receive(timeout)
 }
 
-// GameList requests the summary list of all games stored in O-Zone.
+// GameList requests the summary list of all games stored in O-Zone, decoded.
+// See GameData on why the agent uses the Raw variant.
 func (c *Client) GameList(timeout time.Duration) (map[string]any, error) {
 	if err := c.send(map[string]any{"command": "list"}, timeout); err != nil {
 		return nil, err

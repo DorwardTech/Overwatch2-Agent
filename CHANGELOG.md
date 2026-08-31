@@ -6,6 +6,75 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 The Site Agent and central Overwatch are versioned independently.
 
+## [1.1.3] — 2026-08-30
+
+### Fixed
+
+- **A completed game's results could be filed against the wrong game number.**
+  The results interface answers a request with a bare reply that says nothing
+  about what was asked for, so a reply is only ever "the next message on this
+  connection". That makes a read failure a property of the connection rather
+  than of the game it happened on: a request that times out part-way leaves
+  unread bytes behind, and a slow answer arrives after the agent has given up
+  waiting for it. Either way the conversation is one message out of step, and
+  the next game's request reads the previous game's answer. The agent then sent
+  that data to Overwatch under the number it had asked for — one game's scores
+  recorded against another game — and marked the game done, so nothing ever
+  corrected it. Backfills and resyncs over a slow game server are exactly where
+  this happens, because they fetch many games in a row over one connection.
+  Any read failure now ends that connection and the next game starts a fresh
+  one, and every answer is checked against the game it says it belongs to
+  before it is stored or sent.
+- **A game the venue's game server no longer holds was cached as though it
+  were the game.** Asked for a game it has since discarded, the server replies
+  with a short refusal; the agent stored that refusal as the game's data. The
+  game then counted as cached — so it was offered to scoring software, which
+  received the refusal in place of the results, and the agent never tried to
+  fetch the real thing again. Such a reply is now recognised and the game is
+  left uncached, to be retried later.
+- **The local cache offered scoring software games it could not actually
+  serve.** Games are recorded as soon as they are seen in the game server's
+  list, which happens well before their data is fetched (and never at all while
+  a game is being played). Those games were included in the list handed to
+  scoring software, which then asked for one and was told the game could not be
+  found. Scoring software takes that in its stride — it leaves the game blank
+  and asks again later — so the entry sat in its list never filling in, polled
+  indefinitely, in exactly the situation the cache exists to cover. Only games
+  whose data is actually held are listed now.
+- **One batch Overwatch refuses could hold back hours of telemetry.** Unsent
+  batches are delivered oldest first, so a batch Overwatch rejects outright —
+  because of its content rather than any outage — sat at the front of the queue
+  being retried forever, with every newer batch stuck behind it until the queue
+  finally overflowed. A rejection that identifies the batch itself as the
+  problem now drops that batch, with a log line, and delivery continues. A
+  refusal that can be put right — an expired token, a misconfigured address, or
+  Overwatch being down or busy — still keeps everything queued, because that
+  data has to survive until the fix is made. The same applies to buffered pack
+  emitter readings.
+- **A cached game could survive a power cut half-written.** A game's data was
+  written and then immediately recorded as available, but nothing forced it to
+  the disk. A venue box losing power in that window came back with a truncated
+  file advertised as complete — served to scoring software as-is and never
+  fetched again. Game data is now flushed to disk before it is marked
+  available. (Records of which games exist are still written the cheap way;
+  they cost nothing to rebuild.)
+- **Scoring software that stopped reading could hold a connection open
+  indefinitely.** If a client stopped collecting its replies — crashed
+  mid-game, or a connection the network had already dropped without saying so —
+  the agent's reply could block forever, keeping the connection and its
+  resources tied up. Replies now have a time limit. Waiting for a client to
+  *ask* something is deliberately still unlimited: scoring software holds its
+  connection open and idle between games.
+
+### Changed
+
+- **A batch that fetches many games now stops after repeated connection
+  failures** instead of working through the whole list. Each failure now also
+  costs a reconnection, and a game server failing that consistently will not
+  serve the rest of the list either — while the batch holds exclusive access to
+  the results interface throughout. A single game the server refuses does not
+  count towards this: that is one bad game, not a bad server.
+
 ## [1.1.2] — 2026-08-30
 
 ### Fixed

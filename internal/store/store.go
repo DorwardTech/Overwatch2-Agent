@@ -228,8 +228,15 @@ func (s *Store) PurgeAll() (int, error) {
 // Close is a no-op for the filesystem store (state is already on disk).
 func (s *Store) Close() error { return nil }
 
+// writeRawLocked persists the verbatim payload durably. This is the byte-exact
+// copy the proxy replays, and the metadata written straight after marks it
+// servable — so a crash between the rename and the bytes reaching the disk
+// would leave a truncated file that HasRaw advertises and nothing ever refetches
+// (the agent skips games it believes it has). Metadata is not fsynced: a lost
+// meta update costs nothing, since the next list refresh rebuilds it and a
+// half-written one is skipped at load.
 func (s *Store) writeRawLocked(gameNumber int, raw []byte) error {
-	return writeFileAtomic(s.rawPath(gameNumber), raw)
+	return writeFileDurable(s.rawPath(gameNumber), raw)
 }
 
 func (s *Store) saveMetaLocked(m GameMeta) error {
@@ -254,4 +261,39 @@ func writeFileAtomic(path string, data []byte) error {
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+// writeFileDurable is writeFileAtomic plus the two syncs that make the result
+// survive a power cut: the file's contents before the rename, and the directory
+// entry after it (a rename is only durable once the directory itself is on
+// disk). Venue boxes lose power without warning, which is the whole reason the
+// cache is on disk rather than in memory.
+func writeFileDurable(path string, data []byte) error {
+	tmp := path + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return err
+	}
+	// Best-effort: the payload itself is already durable, and filesystems that
+	// refuse a directory sync (some overlay/network mounts) must not turn a
+	// successful cache write into a failure that triggers a refetch.
+	if dir, err := os.Open(filepath.Dir(path)); err == nil {
+		_ = dir.Sync()
+		_ = dir.Close()
+	}
+	return nil
 }

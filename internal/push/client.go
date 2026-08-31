@@ -5,6 +5,7 @@ package push
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -34,6 +35,41 @@ type OzoneGameMeta struct {
 	EndTime     string `json:"end_time"`
 	PlayerCount int    `json:"player_count"`
 	Valid       int    `json:"valid"`
+}
+
+// HTTPError is a non-2xx response from central. Callers need the status code
+// itself, not just a message: a rejection that names the PAYLOAD as the problem
+// will fail identically on every retry, and the telemetry buffer has to be able
+// to tell that apart from an outage it should keep waiting out.
+type HTTPError struct {
+	StatusCode int
+}
+
+func (e *HTTPError) Error() string {
+	return fmt.Sprintf("central returned HTTP %d", e.StatusCode)
+}
+
+// Unsendable reports whether central's rejection names the PAYLOAD as the
+// problem, so no amount of retrying will get it accepted. Buffers are strictly
+// FIFO, so an entry like that has to be dropped rather than retried forever:
+// everything newer is queued behind it.
+//
+// This is deliberately a narrow allowlist rather than "any 4xx". A bad or
+// rotated token (401/403) and a mis-set URL or a central too old for the
+// endpoint (404) are all fixed by changing the deployment — and the buffered
+// data has to still be there when that fix lands, not have been discarded while
+// the operator was making it. 408 and 429 say "later", not "never".
+func Unsendable(err error) bool {
+	var httpErr *HTTPError
+	if !errors.As(err, &httpErr) {
+		return false // a network error or timeout: central may simply be down
+	}
+	switch httpErr.StatusCode {
+	case http.StatusBadRequest, http.StatusRequestEntityTooLarge, http.StatusUnprocessableEntity:
+		return true
+	default:
+		return false
+	}
 }
 
 // Command is a unit of work handed to the agent by central.
@@ -246,7 +282,7 @@ func (p *Pusher) post(endpoint string, payload []byte, idempotencyKey string) er
 	_, _ = io.Copy(io.Discard, resp.Body)
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("central returned HTTP %d", resp.StatusCode)
+		return &HTTPError{StatusCode: resp.StatusCode}
 	}
 	return nil
 }
