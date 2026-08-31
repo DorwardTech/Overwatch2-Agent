@@ -4,6 +4,13 @@
 // The queue lives in memory; Save/Load spill it to disk across restarts so an
 // outage that overlaps a restart (redeploy, reboot_agent) doesn't silently
 // drop buffered telemetry.
+//
+// The queue is bounded twice: by entry count, and by total bytes. Count alone
+// is not a memory bound, because it says nothing about how large an entry is —
+// and the pack-IR listener accepts entries from anywhere on the venue LAN
+// without authentication. At the default 2000 entries and its 64 KiB body cap,
+// count alone permits 128 MB of queue inside a 128 MB container: an OOM kill,
+// which skips the graceful spill and takes the unsent telemetry with it.
 package buffer
 
 import (
@@ -19,27 +26,45 @@ type Entry struct {
 	Data []byte
 }
 
+// MaxBytes caps the total payload the queue will hold, whatever the entry
+// count allows. 32 MB is generous for the telemetry path (a batch is a few KB,
+// so thousands still fit) while leaving the 128 MB container ample headroom.
+const MaxBytes = 32 << 20
+
 type Buffer struct {
-	mu    sync.Mutex
-	items []Entry
-	max   int
+	mu       sync.Mutex
+	items    []Entry
+	bytes    int // total len(Data) currently queued
+	max      int // entry-count bound
+	maxBytes int // payload-size bound
 }
 
 func New(max int) *Buffer {
 	if max < 1 {
 		max = 1
 	}
-	return &Buffer{max: max}
+	return &Buffer{max: max, maxBytes: MaxBytes}
 }
 
-// Push appends an entry, dropping the oldest if at capacity.
+// Push appends an entry, dropping the oldest until the queue is inside both
+// the entry-count and the byte budget. A single entry larger than the whole
+// budget is still kept — dropping it outright would silently lose data, and it
+// is the only entry left by the time the loop is done.
 func (b *Buffer) Push(key string, data []byte) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if len(b.items) >= b.max {
+
+	b.items = append(b.items, Entry{Key: key, Data: data})
+	b.bytes += len(data)
+	b.trimLocked()
+}
+
+// trimLocked drops oldest entries until the queue fits both bounds.
+func (b *Buffer) trimLocked() {
+	for len(b.items) > 1 && (len(b.items) > b.max || b.bytes > b.maxBytes) {
+		b.bytes -= len(b.items[0].Data)
 		b.items = b.items[1:]
 	}
-	b.items = append(b.items, Entry{Key: key, Data: data})
 }
 
 // Peek returns the oldest entry without removing it.
@@ -57,6 +82,7 @@ func (b *Buffer) PopFront() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if len(b.items) > 0 {
+		b.bytes -= len(b.items[0].Data)
 		b.items = b.items[1:]
 	}
 }
@@ -65,6 +91,13 @@ func (b *Buffer) Len() int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return len(b.items)
+}
+
+// Bytes returns the total payload currently queued.
+func (b *Buffer) Bytes() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.bytes
 }
 
 // Save writes the queued entries to path (atomic: temp file + rename). An
@@ -116,12 +149,16 @@ func (b *Buffer) Load(path string) (int, error) {
 	}
 
 	b.mu.Lock()
-	if len(items) > b.max {
-		items = items[len(items)-b.max:] // keep the most recent
-	}
+	queued := len(b.items)
 	b.items = append(items, b.items...)
+	b.bytes = 0
+	for _, e := range b.items {
+		b.bytes += len(e.Data)
+	}
+	b.trimLocked() // restored entries are bounded exactly like pushed ones
+	restored := max(len(b.items)-queued, 0)
 	b.mu.Unlock()
 
 	_ = os.Remove(path)
-	return len(items), nil
+	return restored, nil
 }

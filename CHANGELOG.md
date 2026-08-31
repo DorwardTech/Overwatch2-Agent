@@ -6,6 +6,45 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 The Site Agent and central Overwatch are versioned independently.
 
+## [1.1.4] — 2026-08-31
+
+### Security
+
+- **The legacy mode printed its database password at startup.** Running against
+  a P&C Micro game database, the agent logged its connection string verbatim on
+  the first line — user, host, database *and password* — so the credential sat
+  in `docker logs` and in anything that collects them. The account is read-only,
+  but the database it opens holds member records, and a password nobody meant
+  to publish is still a password. The line now shows only the user, host and
+  database.
+- **The venue LAN could exhaust the agent's memory.** Both listeners the agent
+  opens on the venue network are unauthenticated by design — the scoring
+  software speaks plain TCP and cannot be changed — so anything on that network
+  can connect to them. Three bounds now apply, because the agent has 128 MB and
+  being killed for running out of it skips the graceful shutdown that saves
+  unsent telemetry:
+  - Concurrent connections to the game-data listener are capped (64, far past
+    any real use). Past that, connections are refused rather than accepted and
+    held; a refused client reconnects, whereas an exhausted agent goes down.
+  - A request is now capped at 64 KiB. A message declares its own length before
+    sending it, and the listener reserved that much up front — a client could
+    declare the 10 MiB protocol maximum, send nothing, and repeat until the
+    agent died. Requests are a few dozen bytes; the large limit exists for the
+    replies.
+  - A request that stops part-way through now times out. Waiting for a client
+    to *start* a request is still unlimited, because scoring software holds its
+    connection open and idle between games.
+- **A single oversized message from the game server could end the agent.** The
+  websocket connection had no message-size limit, so one huge frame — from a
+  compromised or impersonated game server — was read into memory whole. Capped
+  at 10 MiB, matching the limit already applied elsewhere.
+- **The unsent-telemetry queue is now bounded by size as well as count.** A
+  limit of 2000 entries is not a memory limit, because it says nothing about how
+  large an entry is, and the pack-emitter listener accepts entries from anywhere
+  on the venue LAN. At the maximum accepted size that was 128 MB of queue inside
+  a 128 MB container. The queue now also stops at 32 MB, dropping oldest first
+  exactly as it already did when full.
+
 ## [1.1.3] — 2026-08-30
 
 ### Fixed

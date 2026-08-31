@@ -209,6 +209,9 @@ func (a *App) Overview() map[string]any {
 	if a.proxy != nil {
 		overview["proxy_connections"] = a.proxy.Connections()
 		overview["proxy_served"] = a.proxy.Served()
+		// Non-zero means something on the venue LAN opened more connections
+		// than the listener will hold — worth an operator's attention.
+		overview["proxy_refused"] = a.proxy.Refused()
 	}
 	if a.packir != nil {
 		overview["pack_ir"] = a.packir.Status()

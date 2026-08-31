@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"overwatch/agent/internal/version"
@@ -138,6 +139,33 @@ func Load() (Config, error) {
 
 // envBool parses k as a bool, warning (rather than silently defaulting) on a
 // malformed value so a typo'd flag doesn't go unnoticed for weeks.
+// RedactDSN renders a database DSN safe to log: user@host/db, with the password
+// and any query string removed.
+//
+// The legacy startup line used to print NEXUS_DSN verbatim, so the credentials
+// for the venue's Nexus database landed in `docker logs` and in whatever ships
+// those logs onward. The account is read-only, but the database it opens holds
+// member records — a password nobody meant to publish is still a password.
+func RedactDSN(dsn string) string {
+	if dsn == "" {
+		return "(not set)"
+	}
+	at := strings.LastIndex(dsn, "@")
+	if at < 0 {
+		return "(set)" // not a shape we recognise: say nothing about it
+	}
+	user, addr := dsn[:at], dsn[at+1:]
+	if i := strings.Index(user, ":"); i >= 0 {
+		user = user[:i]
+	}
+	// Parameters can carry credentials of their own, so they go too.
+	if i := strings.Index(addr, "?"); i >= 0 {
+		addr = addr[:i]
+	}
+
+	return user + "@" + addr
+}
+
 func envBool(k string, def bool) bool {
 	v := os.Getenv(k)
 	if v == "" {

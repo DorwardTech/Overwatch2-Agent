@@ -2,7 +2,9 @@ package proxy
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/json"
+	"io"
 	"net"
 	"testing"
 	"time"
@@ -170,5 +172,95 @@ func TestProxyAckIsSilent(t *testing.T) {
 	}
 	if err := json.Unmarshal(ask(t, conn, map[string]any{"command": "list"}), &list); err != nil {
 		t.Fatalf("expected list after silent ack: %v", err)
+	}
+}
+
+// The listener is unauthenticated and reachable from the whole venue LAN. A
+// client that declares a huge frame and then stalls would, without a tighter
+// inbound cap, have the proxy allocate the declared buffer up front and hold
+// it — about a dozen such connections is the agent's whole container.
+func TestOversizedRequestFrameIsRefused(t *testing.T) {
+	p, _ := startProxy(t)
+	conn := dial(t, p.Addr())
+	defer conn.Close()
+
+	// Declare 8 MiB — inside the protocol maximum, far past any real request —
+	// and send nothing after the header.
+	header := make([]byte, 5)
+	binary.LittleEndian.PutUint32(header[:4], 8<<20)
+	header[4] = ozoneproto.TokenByte
+	if _, err := conn.Write(header); err != nil {
+		t.Fatal(err)
+	}
+
+	// The proxy must drop the connection rather than wait on the body.
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := io.ReadFull(conn, make([]byte, 1)); err == nil {
+		t.Fatal("proxy answered an oversized request instead of closing")
+	}
+}
+
+// A request that stops part-way through its body must not hold the connection
+// open forever — but a client that has sent nothing at all is simply idle
+// between games and must be left alone.
+func TestPartialRequestBodyTimesOut(t *testing.T) {
+	p, _ := startProxy(t)
+	conn := dial(t, p.Addr())
+	defer conn.Close()
+
+	body := []byte(`{"command":"list"}`)
+	header := make([]byte, 5)
+	binary.LittleEndian.PutUint32(header[:4], uint32(len(body)))
+	header[4] = ozoneproto.TokenByte
+	if _, err := conn.Write(append(header, body[:4]...)); err != nil { // header + a fragment
+		t.Fatal(err)
+	}
+
+	_ = conn.SetReadDeadline(time.Now().Add(bodyTimeout + 5*time.Second))
+	if _, err := io.ReadFull(conn, make([]byte, 1)); err == nil {
+		t.Fatal("proxy answered a truncated request instead of closing")
+	}
+}
+
+// Past the concurrency cap the proxy refuses rather than accepting and holding:
+// an accepted connection costs a goroutine and a buffer, and being refused is
+// recoverable (clients reconnect) where an OOM kill is not.
+func TestConnectionsAreCapped(t *testing.T) {
+	p, _ := startProxy(t)
+
+	open := make([]net.Conn, 0, maxConns)
+	defer func() {
+		for _, c := range open {
+			_ = c.Close()
+		}
+	}()
+	for i := 0; i < maxConns; i++ {
+		c, err := net.Dial("tcp", p.Addr())
+		if err != nil {
+			t.Fatalf("dial %d: %v", i, err)
+		}
+		open = append(open, c)
+	}
+
+	// Wait for the accept loop to have registered them all.
+	deadline := time.Now().Add(5 * time.Second)
+	for p.Connections() < maxConns && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := p.Connections(); got != maxConns {
+		t.Fatalf("open connections = %d, want %d", got, maxConns)
+	}
+
+	extra, err := net.Dial("tcp", p.Addr())
+	if err != nil {
+		return // refused at the TCP level is also a refusal
+	}
+	defer extra.Close()
+	_ = extra.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := io.ReadFull(extra, make([]byte, 1)); err == nil {
+		t.Fatal("proxy served a connection past the cap instead of closing it")
+	}
+	if p.Refused() == 0 {
+		t.Error("the refusal was not counted")
 	}
 }
