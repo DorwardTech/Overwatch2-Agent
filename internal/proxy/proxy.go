@@ -33,6 +33,21 @@ import (
 // and safely exceeds TORN's poll.
 const bannerGap = 50 * time.Millisecond
 
+// writeTimeout bounds a single write. A peer that has stopped reading — TORN
+// crashed mid-game, or a half-open connection the OS has not yet reaped — fills
+// the socket buffer, and an unbounded Write then blocks this goroutine (holding
+// the connection slot) for as long as the peer stays up. Reads deliberately
+// have NO deadline: TORN holds its connection open and idle between games, so
+// cutting a quiet reader would be a fault, not a fix.
+const writeTimeout = 30 * time.Second
+
+// writeFrame sends one framed message under the write deadline.
+func writeFrame(conn net.Conn, body []byte) error {
+	_ = conn.SetWriteDeadline(time.Now().Add(writeTimeout))
+	_, err := conn.Write(ozoneproto.Frame(body))
+	return err
+}
+
 // Server is the print-server proxy.
 type Server struct {
 	cache  *cache.Cache
@@ -140,7 +155,7 @@ func (s *Server) handle(conn net.Conn) {
 		if i > 0 {
 			time.Sleep(bannerGap)
 		}
-		if _, err := conn.Write(ozoneproto.Frame(frame)); err != nil {
+		if err := writeFrame(conn, frame); err != nil {
 			return
 		}
 	}
@@ -159,7 +174,7 @@ func (s *Server) handle(conn net.Conn) {
 			continue
 		}
 		s.served.Add(1)
-		if _, err := conn.Write(ozoneproto.Frame(reply)); err != nil {
+		if err := writeFrame(conn, reply); err != nil {
 			return
 		}
 	}

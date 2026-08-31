@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"overwatch/agent/internal/buffer"
+	"overwatch/agent/internal/push"
 )
 
 // Forwarder delivers a batched pack-IR payload to central. *push.Pusher
@@ -189,6 +190,14 @@ func (s *Server) drain() {
 			return
 		}
 		if err := s.fwd.PushPackIR(e.Data, e.Key); err != nil {
+			if push.Unsendable(err) {
+				// Central will reject this batch identically every time, and
+				// the queue is FIFO — leaving it at the head would block every
+				// later reading behind it. Drop it and keep draining.
+				log.Printf("[packir] forward rejected permanently — dropping batch %s: %v", e.Key, err)
+				s.buf.PopFront()
+				continue
+			}
 			log.Printf("[packir] forward failed, %d reading(s) buffered: %v", s.buf.Len(), err)
 			return
 		}

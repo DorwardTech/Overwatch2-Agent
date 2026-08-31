@@ -36,12 +36,24 @@ type listEntry struct {
 	Valid       int    `json:"valid"`
 }
 
-// BuildListResponse renders {"gamelist":[...]} from every known game's metadata.
-// A missing end time is rendered as O-Zone's literal "None".
+// BuildListResponse renders {"gamelist":[...]} from the metadata of every game
+// the cache can actually serve. A missing end time is rendered as O-Zone's
+// literal "None".
+//
+// Games known only from a "list" response — metadata learned before (or without)
+// the payload ever being fetched — are omitted. Advertising one puts a game in
+// TORN's list that answers "Game not found" when TORN asks for it. TORN parses
+// that reply fine, so it does not fail over: it leaves the game unpopulated and
+// asks again later (OZone.cs:365-371), leaving an entry that never fills in and
+// is polled indefinitely — in exactly the degraded window the cache exists to
+// cover.
 func (c *Cache) BuildListResponse() []byte {
 	metas := c.store.AllMeta()
 	list := make([]listEntry, 0, len(metas))
 	for _, m := range metas {
+		if !m.HasRaw {
+			continue
+		}
 		end := m.EndTime
 		if end == "" {
 			end = "None"

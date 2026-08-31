@@ -42,6 +42,29 @@ const (
 // the next safe window without burning a retry attempt.
 var errGameActive = errors.New("game in progress: print server off-limits")
 
+// errFrameMismatch is returned when a results reply identifies itself as a
+// different game than the one requested — the signature of a desynchronised
+// connection. Caching or pushing such a reply would file one game's data under
+// another game's number, so it is refused.
+var errFrameMismatch = errors.New("results: reply is for a different game")
+
+// errNotGameData is returned when a reply is well-formed and in sequence but
+// isn't game data — O-Zone answers a game it no longer holds with
+// {"error":"Game not found"}. Storing that as the verbatim payload would mark
+// the game cached, serve the error blob to TORN in its place, and stop the
+// agent ever fetching the real thing.
+var errNotGameData = errors.New("results: reply is not game data")
+
+// maxBatchFetchErrors bounds how many CONNECTION failures in a row a batch
+// (backfill/resync or a cache refresh) will absorb before giving up: read
+// errors and desyncs, each of which now costs a reconnect on top of its
+// timeout. A print server failing that consistently will not serve the rest of
+// the list either, and the batch holds the results lock while it tries — far
+// better to release it and let the next run start fresh. A game the server
+// simply refuses does NOT count: that is one bad game, not a bad server, and
+// the rest of the list is still worth fetching.
+const maxBatchFetchErrors = 3
+
 // Per-game retry policy for results fetches. A game whose fetch keeps failing
 // (e.g. the print server is stuck on it) backs off exponentially and is
 // abandoned after maxFetchAttempts so it can't hammer the print server on every
@@ -401,12 +424,25 @@ func (a *App) deliver(key string, payload []byte) {
 		if !ok {
 			return
 		}
-		if err := a.pusher.Push(entry.Data, entry.Key); err != nil {
-			log.Printf("[agent] push failed: %v (buffered=%d)", err, a.buf.Len())
-			return
+		err := a.pusher.Push(entry.Data, entry.Key)
+		if err == nil {
+			a.buf.PopFront()
+			a.health.MarkPush()
+			continue
 		}
-		a.buf.PopFront()
-		a.health.MarkPush()
+		if push.Unsendable(err) {
+			// The batch itself is what central objects to, so replaying it can
+			// only fail the same way — and the queue is strictly FIFO, so
+			// leaving it at the head holds back every NEWER batch behind it
+			// until capacity finally evicts it, hours later. Drop it here and
+			// keep the fresher telemetry flowing.
+			log.Printf("[agent] push rejected permanently — dropping batch %s: %v (buffered=%d)",
+				entry.Key, err, a.buf.Len())
+			a.buf.PopFront()
+			continue
+		}
+		log.Printf("[agent] push failed: %v (buffered=%d)", err, a.buf.Len())
+		return
 	}
 }
 
@@ -543,26 +579,132 @@ func (a *App) resultsBacklog() (pending int, givenUp []int) {
 	return len(a.pendingFetch), givenUp
 }
 
+// resultsSession owns the print-server connection for a run of fetches — one
+// game or a whole backfill — and is the only place the agent dials the results
+// API.
+//
+// It exists because the results protocol carries no request/response
+// correlation: a reply says nothing about what was asked for, so the Nth reply
+// is only ever "the Nth frame on this socket". That makes a read error a
+// property of the CONNECTION, not of the game it happened on. A deadline
+// expiring mid-frame leaves unread bytes in the socket; a reply the print
+// server sends after we gave up waiting arrives later, unbidden. Either way the
+// stream is off by one, and the next game's request reads the PREVIOUS game's
+// frame — which central would store under the wrong game number and mark
+// fetched, so nothing would ever correct it.
+//
+// So any read error retires the connection and the next fetch dials a fresh
+// one. Because a fresh dial is a new touch of the print server, it re-checks
+// the idle gate; and because a desync can in principle survive a clean read,
+// every payload is matched against the game number it reports for itself.
+type resultsSession struct {
+	app  *App
+	conn *results.Client
+}
+
+func (a *App) newResultsSession() *resultsSession { return &resultsSession{app: a} }
+
+// connect returns a live connection, dialling one if there isn't a usable one
+// already. Every dial is gated on the print server being idle.
+func (s *resultsSession) connect() (*results.Client, error) {
+	if s.conn != nil {
+		return s.conn, nil
+	}
+	if !s.app.safeForPrintServer(int(s.app.serverMode.Load())) {
+		return nil, errGameActive
+	}
+	rc, err := results.Dial(s.app.cfg.OzoneHost, s.app.cfg.OzoneResultsPort, 5*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	// O-Zone pushes a fixed handshake (texts + event_types) on connect; consume
+	// it before issuing a command, or the reply would be the handshake instead.
+	rc.Drain(s.app.cfg.ResultsHandshake, 5*time.Second)
+	s.conn = rc
+	return rc, nil
+}
+
+// retire closes the current connection. The next command dials a clean one.
+func (s *resultsSession) retire() {
+	if s.conn == nil {
+		return
+	}
+	s.conn.Close()
+	s.conn = nil
+}
+
+// acknowledge tells O-Zone the data was received (best-effort, only if the
+// connection is still live).
+func (s *resultsSession) acknowledge() {
+	if s.conn != nil {
+		_ = s.conn.Acknowledge(5 * time.Second)
+	}
+}
+
+// list fetches the verbatim game list.
+func (s *resultsSession) list() ([]byte, error) {
+	rc, err := s.connect()
+	if err != nil {
+		return nil, err
+	}
+	raw, err := rc.GameListRaw(20 * time.Second)
+	if err != nil {
+		s.retire()
+		return nil, err
+	}
+	return raw, nil
+}
+
+// game fetches one game's verbatim payload and verifies the reply is for the
+// game that was asked for.
+func (s *resultsSession) game(gameNumber int) ([]byte, error) {
+	rc, err := s.connect()
+	if err != nil {
+		return nil, err
+	}
+	raw, err := rc.GameDataRaw(gameNumber, 20*time.Second)
+	if err != nil {
+		s.retire()
+		return nil, err
+	}
+	got, isGame := payloadGameNumber(raw)
+	if !isGame {
+		// Read cleanly and in sequence, so the connection is fine — this is
+		// O-Zone declining the game, not a desync. Keep the connection.
+		return nil, fmt.Errorf("%w (game #%d)", errNotGameData, gameNumber)
+	}
+	if got > 0 && got != gameNumber {
+		s.retire()
+		return nil, fmt.Errorf("%w: asked for #%d, got #%d", errFrameMismatch, gameNumber, got)
+	}
+	return raw, nil
+}
+
+// payloadGameNumber reads the game number a results payload reports for itself.
+// isGame is false when the reply carries no "game" section at all — an error
+// reply rather than game data. The number is 0 when the section is there but
+// nameless, which is NOT treated as a mismatch: the check only ever rejects a
+// reply that positively identifies as a DIFFERENT game.
+func payloadGameNumber(raw []byte) (number int, isGame bool) {
+	var payload struct {
+		Game map[string]any `json:"game"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil || payload.Game == nil {
+		return 0, false
+	}
+	return toInt(payload.Game["gamenum"]), true
+}
+
 // pullGameResults fetches one game from O-Zone's results API and pushes it to
 // central. Shared by the automatic finish detector and the command queue. It is
 // the single chokepoint for per-game print-server access: every caller gets the
 // idle-gate re-checked here, closing any window between an earlier check and
 // the actual connection.
 func (a *App) pullGameResults(gameNumber int) error {
-	if !a.safeForPrintServer(int(a.serverMode.Load())) {
-		return errGameActive
-	}
-	rc, err := results.Dial(a.cfg.OzoneHost, a.cfg.OzoneResultsPort, 5*time.Second)
-	if err != nil {
-		return err
-	}
-	defer rc.Close()
+	s := a.newResultsSession()
+	defer s.retire()
 
-	// O-Zone pushes a fixed handshake (texts + event_types) on connect; consume
-	// it before issuing a command, or the reply would be the handshake instead.
-	rc.Drain(a.cfg.ResultsHandshake, 5*time.Second)
-
-	raw, err := rc.GameDataRaw(gameNumber, 20*time.Second)
+	raw, err := s.game(gameNumber)
 	if err != nil {
 		return err
 	}
@@ -577,7 +719,7 @@ func (a *App) pullGameResults(gameNumber int) error {
 	if err := a.pusher.PushGameResults(gameNumber, data); err != nil {
 		return err
 	}
-	_ = rc.Acknowledge(5 * time.Second)
+	s.acknowledge()
 	return nil
 }
 
@@ -723,14 +865,10 @@ func (a *App) refreshCache() {
 	}
 	defer a.resultsMu.Unlock()
 
-	rc, err := results.Dial(a.cfg.OzoneHost, a.cfg.OzoneResultsPort, 5*time.Second)
-	if err != nil {
-		return
-	}
-	defer rc.Close()
-	rc.Drain(a.cfg.ResultsHandshake, 5*time.Second)
+	sess := a.newResultsSession()
+	defer sess.retire()
 
-	listRaw, err := rc.GameListRaw(20 * time.Second)
+	listRaw, err := sess.list()
 	if err != nil {
 		return
 	}
@@ -743,6 +881,7 @@ func (a *App) refreshCache() {
 	for _, gm := range list.GameList {
 		a.upsertListEntry(gm)
 	}
+	consecutive := 0
 	for _, gm := range list.GameList {
 		num := toInt(gm["gamenum"])
 		if num <= 0 || toInt(gm["valid"]) != 1 || a.store.HasRaw(num) {
@@ -752,13 +891,30 @@ func (a *App) refreshCache() {
 		if !a.safeForPrintServer(int(a.serverMode.Load())) {
 			return
 		}
-		raw, err := rc.GameDataRaw(num, 20*time.Second)
+		raw, err := sess.game(num)
 		if err != nil {
+			if errors.Is(err, errGameActive) {
+				return // a game started as we went to reconnect
+			}
+			log.Printf("[agent] cache: refresh of game #%d failed: %v", num, err)
+			if errors.Is(err, errNotGameData) {
+				continue // this game only; the connection is still good
+			}
+			// The session has retired the connection, so the next game dials
+			// afresh. Stop once the server has failed repeatedly in a row —
+			// this runs again in a minute, and it holds the results lock
+			// meanwhile.
+			consecutive++
+			if consecutive >= maxBatchFetchErrors {
+				log.Printf("[agent] cache: refresh stopped after %d consecutive failures", consecutive)
+				return
+			}
 			continue
 		}
+		consecutive = 0
 		a.cacheGame(num, raw)
 	}
-	_ = rc.Acknowledge(5 * time.Second)
+	sess.acknowledge()
 }
 
 // cacheGame stores a verbatim "all" payload in the local cache and, when failover
@@ -1072,20 +1228,20 @@ func (a *App) syncGames(payload map[string]any, force bool) (string, map[string]
 		return "deferred", map[string]any{"reason": "game in progress"}
 	}
 
-	rc, err := results.Dial(a.cfg.OzoneHost, a.cfg.OzoneResultsPort, 5*time.Second)
+	sess := a.newResultsSession()
+	defer sess.retire()
+
+	listRaw, err := sess.list()
 	if err != nil {
 		return "failed", map[string]any{"error": err.Error()}
 	}
-	defer rc.Close()
-	rc.Drain(a.cfg.ResultsHandshake, 5*time.Second)
-
-	list, err := rc.GameList(20 * time.Second)
-	if err != nil {
+	var list map[string]any
+	if err := json.Unmarshal(listRaw, &list); err != nil {
 		return "failed", map[string]any{"error": err.Error()}
 	}
 	games, _ := list["gamelist"].([]any)
 
-	synced, failed, skipped := 0, 0, 0
+	synced, failed, skipped, consecutive := 0, 0, 0, 0
 	for _, g := range games {
 		gm, ok := g.(map[string]any)
 		if !ok {
@@ -1110,11 +1266,33 @@ func (a *App) syncGames(payload map[string]any, force bool) (string, map[string]
 				"reason": "game started mid-batch", "synced": synced, "skipped": skipped, "failed": failed,
 			}
 		}
-		raw, err := rc.GameDataRaw(num, 20*time.Second)
+		raw, err := sess.game(num)
 		if err != nil {
+			if errors.Is(err, errGameActive) {
+				log.Printf("[agent] sync aborted: game started before reconnect (%d synced so far)", synced)
+				return "deferred", map[string]any{
+					"reason": "game started mid-batch", "synced": synced, "skipped": skipped, "failed": failed,
+				}
+			}
+			log.Printf("[agent] sync: game #%d failed: %v", num, err)
 			failed++
+			if errors.Is(err, errNotGameData) {
+				continue // this game only; the connection is still good
+			}
+			// The connection has been retired; the next game dials afresh. Stop
+			// once the print server has failed repeatedly in a row rather than
+			// grinding through the rest of the list holding the results lock —
+			// central can re-issue the command.
+			consecutive++
+			if consecutive >= maxBatchFetchErrors {
+				log.Printf("[agent] sync abandoned after %d consecutive failures (%d synced)", consecutive, synced)
+				return "failed", map[string]any{
+					"error": err.Error(), "synced": synced, "skipped": skipped, "failed": failed,
+				}
+			}
 			continue
 		}
+		consecutive = 0
 		a.cacheGame(num, raw)
 
 		var data map[string]any

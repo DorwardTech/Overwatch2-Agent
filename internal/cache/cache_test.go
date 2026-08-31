@@ -86,14 +86,52 @@ func TestBuildListResponseShape(t *testing.T) {
 
 func TestListRendersNoneForMissingEndTime(t *testing.T) {
 	s, _ := store.Open(t.TempDir())
-	_ = s.UpsertListEntry(store.GameMeta{GameNumber: 5, GameName: "Solo", Valid: 0})
+	// A cached game whose list entry never carried an end time.
+	if err := s.StoreGame(store.GameMeta{GameNumber: 5, GameName: "Solo"}, []byte(`{"game":{"gamenum":5}}`)); err != nil {
+		t.Fatal(err)
+	}
 	c := New(s)
 	var v struct {
 		GameList []map[string]any `json:"gamelist"`
 	}
 	_ = json.Unmarshal(c.BuildListResponse(), &v)
+	if len(v.GameList) != 1 {
+		t.Fatalf("want 1 game, got %d", len(v.GameList))
+	}
 	if v.GameList[0]["endtime"] != "None" {
 		t.Errorf("missing end time should render \"None\", got %v", v.GameList[0]["endtime"])
+	}
+}
+
+// The proxy may only advertise games it can actually serve. A game known from a
+// "list" response alone — metadata cached, payload never fetched — answers
+// TORN's follow-up "all" with "Game not found", leaving an entry in TORN's list
+// that never fills in and is asked for again indefinitely.
+func TestListOmitsGamesWithoutAPayload(t *testing.T) {
+	s, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.StoreGame(store.GameMeta{GameNumber: 7, GameName: "Cached"}, []byte(`{"game":{"gamenum":7}}`)); err != nil {
+		t.Fatal(err)
+	}
+	// Metadata only: this is what a list refresh records before the backfill
+	// gets to the game (or while a game is active and the fetch is deferred).
+	if err := s.UpsertListEntry(store.GameMeta{GameNumber: 8, GameName: "Listed only", Valid: 1}); err != nil {
+		t.Fatal(err)
+	}
+
+	var v struct {
+		GameList []map[string]any `json:"gamelist"`
+	}
+	if err := json.Unmarshal(New(s).BuildListResponse(), &v); err != nil {
+		t.Fatal(err)
+	}
+	if len(v.GameList) != 1 {
+		t.Fatalf("want only the cached game listed, got %d entries: %v", len(v.GameList), v.GameList)
+	}
+	if v.GameList[0]["gamenum"].(float64) != 7 {
+		t.Errorf("listed gamenum = %v, want 7", v.GameList[0]["gamenum"])
 	}
 }
 

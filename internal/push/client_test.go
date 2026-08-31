@@ -3,6 +3,7 @@ package push
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -200,5 +201,34 @@ func TestPushGameResults(t *testing.T) {
 	}
 	if n, _ := gotBody["game_number"].(float64); int(n) != 7 {
 		t.Errorf("game_number = %v, want 7", gotBody["game_number"])
+	}
+}
+
+// Unsendable draws the line between "central will never take this batch" and
+// "central is unavailable or misconfigured, keep the batch". Getting it wrong in
+// either direction loses data: too broad discards telemetry over a rotated
+// token, too narrow wedges the FIFO buffer behind one bad payload.
+func TestUnsendable(t *testing.T) {
+	drop := []int{http.StatusBadRequest, http.StatusRequestEntityTooLarge, http.StatusUnprocessableEntity}
+	keep := []int{
+		http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound,
+		http.StatusRequestTimeout, http.StatusTooManyRequests,
+		http.StatusInternalServerError, http.StatusServiceUnavailable,
+	}
+	for _, code := range drop {
+		if !Unsendable(&HTTPError{StatusCode: code}) {
+			t.Errorf("HTTP %d should be treated as unsendable", code)
+		}
+	}
+	for _, code := range keep {
+		if Unsendable(&HTTPError{StatusCode: code}) {
+			t.Errorf("HTTP %d should be retried, not dropped", code)
+		}
+	}
+	if Unsendable(errors.New("dial tcp: connection refused")) {
+		t.Error("a network error must be retried, not dropped")
+	}
+	if Unsendable(nil) {
+		t.Error("no error is not a rejection")
 	}
 }
