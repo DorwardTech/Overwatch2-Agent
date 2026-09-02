@@ -19,6 +19,9 @@
 ;
 ;   Expand-Archive overwatch-agent_1.3.3_windows_amd64.zip -DestinationPath stage\amd64
 ;   Expand-Archive overwatch-agent_1.3.3_windows_arm64.zip -DestinationPath stage\arm64
+;
+; both run from the repository root, which is what SourceDir below anchors to:
+;
 ;   & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" `
 ;       /DAppVersion=1.3.3 `
 ;       /DAmd64Dir=stage\amd64\overwatch-agent_1.3.3_windows_amd64 `
@@ -41,6 +44,15 @@
 #endif
 
 [Setup]
+; Relative Source and OutputDir paths resolve against SourceDir, and SourceDir
+; itself against the directory holding this script — NOT the directory ISCC was
+; run from. Without this, staging into <repo>\stage and compiling from <repo>
+; sends Inno looking in <repo>\packaging\windows\stage instead, which is
+; exactly what the first run of this script did. Anchoring it at the repository
+; root makes the relative paths below mean what both workflows, and anyone
+; compiling from the root by hand, already assume they mean.
+SourceDir=..\..
+
 ; Never change AppId. It is what makes the next version an upgrade of this one
 ; rather than a second copy sitting beside it in Add/Remove Programs.
 AppId={{B3F1C7A8-6D42-4E19-9A5C-2F8E0D3B7146}
