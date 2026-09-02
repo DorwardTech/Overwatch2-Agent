@@ -28,7 +28,8 @@ body:
     id: version
     attributes:
       label: Agent version / image tag or commit
-      placeholder: "ghcr.io/dorwardtech/overwatch2-agent:latest"
+      description: "`overwatch-agent version` on Windows; the image tag on Docker."
+      placeholder: "ghcr.io/dorwardtech/overwatch2-agent:latest, or 1.2.0 (Windows service)"
     validations:
       required: true
   - type: checkboxes
@@ -53,4 +54,4 @@ body:
     id: environment
     attributes:
       label: Environment
-      description: OS, Docker version, how the agent is deployed, O-Zone version if relevant.
+      description: OS, how the agent is deployed (Docker image, or the Windows service), Docker version if relevant, O-Zone version if relevant.

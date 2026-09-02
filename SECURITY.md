@@ -40,15 +40,17 @@ disclosure.
 ## Supported versions
 
 This project ships as a rolling release. Security fixes land on `main` and are
-published to the container image as `:latest`.
+published to the container image as `:latest`; the Windows executable is
+published from the same commit on each tagged release.
 
 | Version | Supported |
 |---|---|
 | Latest `main` / `ghcr.io/dorwardtech/overwatch2-agent:latest` | ✅ |
-| Older image tags / commits | ❌ (please update) |
+| Latest tagged Windows release (`overwatch-agent_<ver>_windows_*.zip`) | ✅ |
+| Older image tags / Windows releases / commits | ❌ (please update) |
 
-Always deploy the latest image; older pinned tags do not receive backported
-fixes.
+Always deploy the latest image or Windows release; older pinned versions do not
+receive backported fixes.
 
 ## Scope
 

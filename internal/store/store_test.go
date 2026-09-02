@@ -2,6 +2,7 @@ package store
 
 import (
 	"bytes"
+	"os"
 	"testing"
 	"time"
 )
@@ -126,5 +127,136 @@ func TestAllMetaSorted(t *testing.T) {
 	all := s.AllMeta()
 	if len(all) != 3 || all[0].GameNumber != 2 || all[2].GameNumber != 9 {
 		t.Fatalf("AllMeta not sorted ascending: %+v", all)
+	}
+}
+
+// refreshCache re-lists every game O-Zone holds once a minute and wrote a file
+// per listed game every pass — thousands of writes a minute against a venue
+// box's flash, for data that had not changed.
+func TestUnchangedListEntryIsNotRewritten(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2020, 1, 1, 12, 0, 0, 0, time.UTC)
+	s.now = func() time.Time { return base }
+
+	entry := GameMeta{GameNumber: 7, GameName: "TDM", Duration: 601, StartTime: "s", EndTime: "e", PlayerCount: 4, Valid: 1}
+	if err := s.UpsertListEntry(entry); err != nil {
+		t.Fatal(err)
+	}
+
+	// Remove the file: if the next pass writes, it comes back. That is a
+	// clearer signal than a modification time at this resolution.
+	if err := os.Remove(s.metaPath(7)); err != nil {
+		t.Fatal(err)
+	}
+
+	// A minute later O-Zone lists the same game, unchanged.
+	s.now = func() time.Time { return base.Add(time.Minute) }
+	if err := s.UpsertListEntry(entry); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := os.Stat(s.metaPath(7)); !os.IsNotExist(err) {
+		t.Fatal("an unchanged entry was rewritten")
+	}
+	// The marker did not move either, so memory still matches the disk.
+	if m, _ := s.Meta(7); !m.UpdatedAt.Equal(base) {
+		t.Fatalf("UpdatedAt = %v, want it left at %v", m.UpdatedAt, base)
+	}
+}
+
+func TestChangedListEntryIsWrittenImmediately(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2020, 1, 1, 12, 0, 0, 0, time.UTC)
+	s.now = func() time.Time { return base }
+
+	entry := GameMeta{GameNumber: 7, GameName: "TDM", PlayerCount: 4, Valid: 1}
+	_ = s.UpsertListEntry(entry)
+	if err := os.Remove(s.metaPath(7)); err != nil {
+		t.Fatal(err)
+	}
+
+	// The game finishes: the list now carries an end time. Coalescing must
+	// never delay something a reader would notice.
+	s.now = func() time.Time { return base.Add(time.Minute) }
+	finished := entry
+	finished.EndTime = "2020-01-01 12:01:00"
+	if err := s.UpsertListEntry(finished); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := os.Stat(s.metaPath(7)); err != nil {
+		t.Fatalf("a changed entry was not written: %v", err)
+	}
+	m, _ := s.Meta(7)
+	if m.EndTime != finished.EndTime {
+		t.Fatalf("EndTime = %q, want %q", m.EndTime, finished.EndTime)
+	}
+	if !m.UpdatedAt.Equal(base.Add(time.Minute)) {
+		t.Fatalf("UpdatedAt = %v, want it advanced", m.UpdatedAt)
+	}
+}
+
+func TestFreshnessMarkerStillAdvancesPastTheInterval(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2020, 1, 1, 12, 0, 0, 0, time.UTC)
+	s.now = func() time.Time { return base }
+
+	entry := GameMeta{GameNumber: 7, GameName: "TDM", Valid: 1}
+	_ = s.UpsertListEntry(entry)
+	if err := os.Remove(s.metaPath(7)); err != nil {
+		t.Fatal(err)
+	}
+
+	s.now = func() time.Time { return base.Add(metaTouchInterval + time.Minute) }
+	if err := s.UpsertListEntry(entry); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := os.Stat(s.metaPath(7)); err != nil {
+		t.Fatalf("the marker was not refreshed once the interval had passed: %v", err)
+	}
+}
+
+// The guarantee the coalescing must not break. Prune deletes on UpdatedAt,
+// which means "last seen in O-Zone's list", so a game the venue is still
+// playing must keep its marker fresh — those are exactly the games TORN asks
+// the proxy for when the print server is down.
+func TestStillListedGameSurvivesRetention(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2020, 1, 1, 12, 0, 0, 0, time.UTC)
+	entry := GameMeta{GameNumber: 7, GameName: "TDM", Valid: 1}
+
+	// Two hours of one-minute refreshes, the entry never changing.
+	for i := 0; i <= 120; i++ {
+		at := base.Add(time.Duration(i) * time.Minute)
+		s.now = func() time.Time { return at }
+		if err := s.UpsertListEntry(entry); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// A one-hour retention window, applied at the end of that run.
+	now := base.Add(120 * time.Minute)
+	removed, err := s.Prune(now.Add(-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 0 {
+		t.Fatalf("pruned %d still-listed game(s); the venue would lose the cache it is playing on", removed)
+	}
+	if _, ok := s.Meta(7); !ok {
+		t.Fatal("game 7 should still be cached")
 	}
 }

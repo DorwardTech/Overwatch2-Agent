@@ -6,6 +6,145 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 The Site Agent and central Overwatch are versioned independently.
 
+## [1.2.1] — 2026-09-02
+
+### Security
+
+- **An unreadable server state could be mistaken for an idle one.** The venue's
+  game server reports its current mode, and the agent stores that number in a
+  narrower form than it arrives in. A value too large to fit was silently cut
+  down to size rather than rejected — and some large values cut down to exactly
+  the number that means "idle", which is what the agent checks before it may
+  read from the game server. A game server sending nonsense, or something on
+  the venue network impersonating one, could therefore have opened that door
+  during a live game. An out-of-range value is now recorded as a state the
+  agent recognises as neither idle nor in-game, so it stays shut: not being
+  able to read the state is not the same as reading that it is idle. The same
+  bound is applied where the numbers are first read, so no field can carry a
+  value too large for where it is stored — the mode is simply the one where the
+  consequence was worst.
+
+### Changed
+
+- **The cache stopped rewriting thousands of unchanged files a minute.** The
+  agent re-lists every game the venue's game server holds once a minute and
+  rewrote one small file per listed game each time, whether or not anything
+  about it had changed — steady write wear on the venue box's storage for no
+  new information. Unchanged entries are now left alone. They are still
+  refreshed periodically, because that timestamp is also what decides when an
+  old game leaves the cache, and games the venue is still playing must not age
+  out — there is a test for exactly that.
+- **Backing up finished games to Overwatch no longer scales its memory with the
+  backlog.** Each backup took its own full copy of the game's data the moment
+  it was queued, so a bulk re-sync of a rebuilt cache could hold hundreds of
+  copies at once inside an agent limited to 128 MB, competing with the buffer
+  that exists to survive an outage. Backups now read the data when their turn
+  comes, four at a time.
+
+## [1.2.0] — 2026-09-02
+
+### Added
+
+- **The agent now runs on Windows, as a Windows service.** Until now the only
+  way to run the agent was the container image, which meant a Linux box or a
+  Docker installation at every venue. The same agent now installs itself as a
+  Windows service on any Windows PC on the venue LAN — the game server PC
+  itself is the obvious one — starts with the machine with nobody logged in,
+  restarts if it fails, and keeps its own log. Nothing else is different: the
+  settings, the behaviour and the rules that keep it away from the game
+  server during play are the same code, built for Windows.
+
+  `overwatch-agent.exe install` registers the service to run as the
+  low-privilege *Local Service* account rather than as an administrator,
+  creates the data directory under `C:\ProgramData\Overwatch Agent`, restricts
+  it to administrators and the service — it holds the site token and, with
+  the cache on, the venue's game data — and writes a configuration template
+  there. `start`, `stop`, `restart`, `status` and `uninstall` do what they
+  say. A *Reboot agent* command from Overwatch stops the agent cleanly and the
+  service control manager starts it again, as the container runtime does.
+  Starting, stopping and a failed start are recorded in the Windows
+  Application event log. `WINDOWS.md` is the guide.
+
+  The installer holds the venue's data to the same standard the container did:
+  it takes ownership of the data directory and restricts it to administrators,
+  the system and the service's own identity — not to the shared *Local Service*
+  account every other Windows service of that kind runs as. It refuses to do
+  that to a folder that is not the agent's own, so a drive root or a shared
+  folder passed by mistake is rejected rather than quietly locked down. The
+  service records its data directory on its own command line, so it can never
+  end up reading a different one than the install prepared.
+
+  A configuration the agent cannot use is a **failed start**, not a service
+  that reports success and stops a second later: the settings are read and
+  checked before Windows is told the service is running, and the reason is in
+  the event log. A stop that takes a moment — the agent finishes what it is
+  doing and writes out unsent telemetry — keeps telling Windows it is making
+  progress, so it is never mistaken for a hung service and killed mid-write.
+
+  Builds for Windows x64 and Arm64 are published with each release.
+
+- **Configuration can come from a file.** The agent has only ever read its
+  settings from environment variables, which suits a container and little
+  else. It now also reads a `KEY=VALUE` file — the same lines as
+  `.env.example` — named by `--config`, by `AGENT_ENV_FILE`, or found as
+  `agent.env` in the data directory. Anything already set in the environment
+  takes precedence over the file, so nothing a compose file or a shell sets
+  can be overridden behind its back.
+
+- **The log can go to a file.** `LOG_FILE` names a file the agent writes its
+  log to as well as the console, rotated at 10 MB with five generations kept,
+  so it can neither vanish nor fill the disk. On Windows it defaults to
+  `logs\agent.log` in the data directory — a service has no console — and the
+  service writes only there.
+
+- **A data directory.** `AGENT_DATA_DIR` (or `--data-dir`) names one place for
+  everything the agent keeps: the cache, the unsent-telemetry spill files, the
+  log and the configuration file all default to paths under it. On Windows it
+  defaults to `%ProgramData%\Overwatch Agent`. In the container nothing
+  changes: no data directory is assumed there, and every default is exactly
+  what it was.
+
+### Fixed
+
+- **`healthcheck` built the wrong address when `HEALTH_ADDR` named a host.** It
+  put `127.0.0.1` in front of whatever the setting held, which was right for
+  the default `:8088` and wrong for anything else — `127.0.0.1:8088` became
+  `127.0.0.1127.0.0.1:8088`. It now probes the host given, or the loopback
+  address when the setting binds every interface.
+
+## [1.1.5] — 2026-09-01
+
+### Fixed
+
+- **Losing contact with the venue's game server left the agent acting on a stale
+  all-clear.** The agent reads the game server's state only on its polling
+  connection. When that connection drops — a restart at the venue, a network
+  fault, anything the agent then retries for as long as the outage lasts — the
+  last reading simply stands. If it read "idle", it stays "idle" for the whole
+  outage, however long that is and whatever happens at the venue meanwhile.
+
+  Two paths reach the game server without going through the poll loop: an
+  operator pressing Resync on the site control panel, and the handler that runs
+  when a game finishes. Either could therefore start reading game data during
+  live play, on the strength of a reading taken before the connection dropped —
+  and the cache refresh is the heaviest read there is, the full game list plus
+  every game the agent does not already hold.
+
+  The safety check now requires a reading that is *current*, not merely
+  favourable. A reading older than two minutes — comfortably longer than the
+  gap between polls, far shorter than any real outage — no longer counts as an
+  all-clear, and an agent that has never polled is never clear. The work is
+  deferred exactly as it is during a game, and picked up once the link is back.
+
+### Changed
+
+- **Deferred results work now reports which of the two reasons applied.** A
+  backfill, resync or re-fetch that is held back says either that a game is
+  active or that contact with the game server has been lost, instead of
+  reporting "game in progress" for both. An operator watching a command sit in
+  "deferred" throughout an outage was being told the one thing that was not
+  happening.
+
 ## [1.1.4] — 2026-08-31
 
 ### Security

@@ -2,8 +2,12 @@ package app
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
+	"math"
 	"net"
 	"testing"
+	"time"
 
 	"overwatch/agent/internal/config"
 	"overwatch/agent/internal/msgbus"
@@ -13,6 +17,7 @@ import (
 
 func TestSafeForPrintServerRequiresBothSignals(t *testing.T) {
 	a := &App{}
+	a.noteServerMode(1) // a current reading, so only the two signals are in play
 
 	// Idle state + safe mode => safe.
 	a.gameState.Store(stateIdle)
@@ -33,6 +38,145 @@ func TestSafeForPrintServerRequiresBothSignals(t *testing.T) {
 	a.gameState.Store(stateIdle)
 	if a.safeForPrintServer(6) {
 		t.Error("active mode must block the print server even when state is idle")
+	}
+}
+
+// Both idle signals are only refreshed by the poll loop, so an agent that has
+// lost its O-Zone link holds a reading that says whatever was true when the
+// link dropped. Not knowing the server state is not the same as knowing it is
+// idle, so an aged reading must not open the gate.
+func TestSafeForPrintServerRequiresACurrentReading(t *testing.T) {
+	a := &App{}
+	a.gameState.Store(stateIdle)
+
+	// Never polled: the gate has nothing to go on.
+	if a.safeForPrintServer(1) {
+		t.Error("an agent that has never read SERVERMODE must not touch the print server")
+	}
+	if !errors.Is(a.printServerGate(), errLinkStale) {
+		t.Errorf("gate = %v, want errLinkStale before the first poll", a.printServerGate())
+	}
+
+	// A current reading opens it.
+	a.noteServerMode(1)
+	if !a.safeForPrintServer(1) {
+		t.Error("a current idle reading should be safe")
+	}
+	if err := a.printServerGate(); err != nil {
+		t.Errorf("gate = %v, want nil on a current idle reading", err)
+	}
+
+	// The same reading, now older than the bound, closes it again.
+	a.serverModeAt.Store(time.Now().Add(-maxServerModeAge - time.Second).UnixNano())
+	if a.safeForPrintServer(1) {
+		t.Error("a stale idle reading must not open the gate")
+	}
+	if !errors.Is(a.printServerGate(), errLinkStale) {
+		t.Errorf("gate = %v, want errLinkStale on a stale reading", a.printServerGate())
+	}
+
+	// An active game still reports as such rather than as a stale link.
+	a.noteServerMode(6)
+	a.gameState.Store(stateActive)
+	if !errors.Is(a.printServerGate(), errGameActive) {
+		t.Errorf("gate = %v, want errGameActive during a game", a.printServerGate())
+	}
+}
+
+// SERVERMODE arrives as untrusted JSON and is stored narrowed to int32, so a
+// value outside that range truncates — and 2^32+1 truncates to 1, which is in
+// printServerSafe's allowlist. A nonsense reading could therefore open the
+// print-server gate during a live game.
+func TestOutOfRangeServerModeClosesTheGate(t *testing.T) {
+	if math.MaxInt <= math.MaxInt32 {
+		// linux/arm/v7 is one of the published images: there int IS int32, so
+		// the conversion cannot truncate and there is nothing to close.
+		t.Skip("int is 32 bits here; SERVERMODE cannot truncate into int32")
+	}
+
+	a := &App{}
+	a.gameState.Store(stateIdle)
+
+	// 2^32 + 1. Narrowed to int32 that is exactly 1 — "idle", and inside
+	// printServerSafe's allowlist. Built from a variable shift so the constant
+	// cannot overflow int when this file is compiled for 32-bit.
+	bits := 32
+	truncatesToIdle := int(int64(1)<<bits | 1)
+
+	a.noteServerMode(truncatesToIdle)
+
+	if got := a.serverMode.Load(); got == 1 {
+		t.Fatal("an out-of-range mode truncated into the safe allowlist")
+	}
+	if printServerSafe(int(a.serverMode.Load())) {
+		t.Error("an unreadable server mode must not be treated as safe")
+	}
+	if gameActive(int(a.serverMode.Load())) {
+		t.Error("an unreadable server mode must not be claimed as an active game either")
+	}
+	if a.printServerGate() == nil {
+		t.Error("the print-server gate must stay closed on an unreadable mode")
+	}
+
+	// A mode that fits is still recorded exactly.
+	a.noteServerMode(6)
+	if got := a.serverMode.Load(); got != 6 {
+		t.Fatalf("serverMode = %d, want 6", got)
+	}
+}
+
+// toInt is where the truncation risk starts: it hands back values that some
+// callers store narrowed to int32, and a wrapped value can be a plausible small
+// one. Saturating keeps out-of-range input recognisably out of range.
+func TestToIntSaturatesOutsideInt32(t *testing.T) {
+	big := int64(1)<<32 | 1 // wraps to 1 — "idle" — if it is ever truncated
+
+	cases := []struct {
+		name string
+		in   any
+		want int
+	}{
+		{"json number decodes as float64", float64(big), math.MaxInt32},
+		{"an int64 field", big, math.MaxInt32},
+		{"a numeric string", "4294967297", math.MaxInt32},
+		{"negative overflow", float64(-big), math.MinInt32},
+		{"a NaN is no number at all", math.NaN(), 0},
+		{"an ordinary mode is untouched", float64(6), 6},
+		{"an ordinary string is untouched", "18", 18},
+		{"a game number is untouched", float64(120345), 120345},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := toInt(c.in); got != c.want {
+				t.Fatalf("toInt(%v) = %d, want %d", c.in, got, c.want)
+			}
+		})
+	}
+
+	// The point of saturating rather than wrapping: the result is not a mode
+	// the print server may be touched in.
+	if printServerSafe(toInt(float64(big))) {
+		t.Error("a saturated mode must not read as safe")
+	}
+}
+
+// deferrable separates "not now" from "this failed": neither an active game nor
+// a stale link may burn a per-game retry attempt or a batch's failure budget.
+func TestDeferrableCoversBothIdleRefusals(t *testing.T) {
+	for _, err := range []error{errGameActive, errLinkStale} {
+		if !deferrable(err) {
+			t.Errorf("deferrable(%v) = false, want true", err)
+		}
+		if !deferrable(fmt.Errorf("wrapped: %w", err)) {
+			t.Errorf("deferrable(wrapped %v) = false, want true", err)
+		}
+	}
+	if deferrable(errFrameMismatch) {
+		t.Error("a desync is a real failure, not a deferral")
+	}
+	if deferrable(nil) {
+		t.Error("deferrable(nil) = true, want false")
 	}
 }
 
@@ -104,6 +248,40 @@ func TestMetaFromRaw(t *testing.T) {
 	}
 }
 
+// A cache refresh reaches the print server from paths that do not depend on the
+// poll loop — an operator pressing Resync on the control panel, or the Message
+// Bus finish handler — while the reading it is gated on is written only BY the
+// poll loop. So an agent that has lost its O-Zone link holds an "idle" that is
+// just the last thing it saw, and the heaviest print-server operation there is
+// (the full list, plus every uncached game) must not run on it.
+func TestRefreshCacheRefusesOnAStaleLink(t *testing.T) {
+	ps := ozonesim.NewPrintServer()
+	if err := ps.Start(0); err != nil {
+		t.Fatal(err)
+	}
+	defer ps.Close()
+	host, port, _ := net.SplitHostPort(ps.Addr())
+
+	a := New(config.Config{
+		OzoneHost:        host,
+		OzoneResultsPort: port,
+		ResultsHandshake: 2,
+		CacheEnabled:     true,
+		CacheDir:         t.TempDir(),
+		CentralURL:       "http://central.invalid",
+		Token:            "test",
+	})
+	a.noteServerMode(1) // idle...
+	a.gameState.Store(stateIdle)
+	a.serverModeAt.Store(time.Now().Add(-maxServerModeAge - time.Second).UnixNano()) // ...as of a while ago
+
+	a.refreshCache()
+
+	if ps.Connections() != 0 {
+		t.Fatalf("print server was contacted on a stale reading (connections=%d)", ps.Connections())
+	}
+}
+
 // End-to-end: against a fake O-Zone print server, refreshCache fills the cache
 // verbatim when idle, and refuses entirely while a game is active.
 func TestRefreshCacheIdleGated(t *testing.T) {
@@ -126,7 +304,7 @@ func TestRefreshCacheIdleGated(t *testing.T) {
 
 	// While a game is active, refreshCache must not even connect.
 	active := New(cfg)
-	active.serverMode.Store(6)
+	active.noteServerMode(6)
 	active.gameState.Store(stateActive)
 	active.refreshCache()
 	if ps.Connections() != 0 {
@@ -135,7 +313,7 @@ func TestRefreshCacheIdleGated(t *testing.T) {
 
 	// When idle, refreshCache pulls the list and caches the game verbatim.
 	idle := New(cfg)
-	idle.serverMode.Store(1)
+	idle.noteServerMode(1)
 	idle.gameState.Store(stateIdle)
 	idle.refreshCache()
 

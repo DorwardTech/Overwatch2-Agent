@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"overwatch/agent/internal/platform"
 	"overwatch/agent/internal/version"
 )
 
@@ -27,7 +28,12 @@ type Config struct {
 	SlowPollInterval time.Duration
 	HealthAddr       string
 	BufferMax        int
-	BufferFile       string // spill unsent telemetry here across restarts ("" disables)
+	// BufferFile spills unsent telemetry across restarts ("" disables). Path
+	// defaults come from internal/platform: in a container they are the
+	// historical values (./cache, spill files off) because the compose file
+	// sets the real ones; on Windows, or wherever AGENT_DATA_DIR is set, they
+	// live under one data directory so a service has somewhere to keep state.
+	BufferFile string
 
 	// Pack IR bench listener: an on-prem calibration node POSTs emitter-strength
 	// readings here over the LAN and the agent forwards them to central. Bind
@@ -82,10 +88,10 @@ func Load() (Config, error) {
 		SlowPollInterval: time.Duration(envInt("SLOW_POLL_INTERVAL", 60)) * time.Second,
 		HealthAddr:       env("HEALTH_ADDR", ":8088"),
 		BufferMax:        envInt("BUFFER_MAX", 2000),
-		BufferFile:       env("BUFFER_FILE", ""),
+		BufferFile:       env("BUFFER_FILE", platform.DefaultBufferFile()),
 
 		PackIRAddr:       env("PACK_IR_ADDR", ""),
-		PackIRBufferFile: env("PACK_IR_BUFFER_FILE", ""),
+		PackIRBufferFile: env("PACK_IR_BUFFER_FILE", platform.DefaultPackIRBufferFile()),
 
 		Mode:             env("AGENT_MODE", "ozone"),
 		NexusDSN:         os.Getenv("NEXUS_DSN"),
@@ -98,7 +104,7 @@ func Load() (Config, error) {
 		MsgBusEnabled:   envBool("ENABLE_MSG_BUS", false),
 		OzoneMsgBusPort: env("OZONE_MSG_BUS_PORT", "12111"),
 		CacheEnabled:    envBool("ENABLE_CACHE", false),
-		CacheDir:        env("CACHE_DIR", "./cache"),
+		CacheDir:        env("CACHE_DIR", platform.DefaultCacheDir()),
 		CacheRetention:  time.Duration(envInt("CACHE_RETENTION_HOURS", 24)) * time.Hour,
 		GameFinishDelay: time.Duration(envInt("GAME_FINISH_DELAY", 15)) * time.Second,
 

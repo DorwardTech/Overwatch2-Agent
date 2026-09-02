@@ -172,7 +172,7 @@ func newFaultApp(t *testing.T, ps *faultyPrintServer) (*App, *pushedGames) {
 		CacheEnabled:     true,
 		CacheDir:         t.TempDir(),
 	})
-	a.serverMode.Store(1) // idle
+	a.noteServerMode(1) // idle
 	a.gameState.Store(stateIdle)
 	return a, pushed
 }
