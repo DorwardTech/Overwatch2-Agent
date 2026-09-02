@@ -22,39 +22,37 @@ PC itself is the usual choice; the one thing to know about that is under
 
 ## Install
 
-1. **Download** `overwatch-agent_<version>_windows_amd64.zip` (or `_arm64`)
-   from the [Releases](https://github.com/DorwardTech/Overwatch2-Agent/releases)
-   page, and check it against `SHA256SUMS.txt` from the same release:
+1. **Download** `overwatch-agent_<version>_windows_setup.exe` from the
+   [Releases](https://github.com/DorwardTech/Overwatch2-Agent/releases) page.
+   One installer covers both **x64** and **Arm64**; it installs the build this
+   machine can run.
 
-   ```powershell
-   Get-FileHash .\overwatch-agent_1.2.0_windows_amd64.zip -Algorithm SHA256
-   ```
+2. **Run it** and say yes to the administrator prompt.
 
-2. **Extract** it to `C:\Program Files\Overwatch Agent\`. The folder should
-   hold `overwatch-agent.exe`, `agent.env.example`, this guide and the
-   changelog. Keep the executable under *Program Files*: the service runs as a
-   limited account that cannot read files in a user's profile.
+   > Windows will most likely say *"Windows protected your PC"* first. The
+   > installer is not signed with a certificate, so SmartScreen has nothing to
+   > check it against. Choose **More info → Run anyway**. To be sure you have
+   > the file we published, check it against `SHA256SUMS.txt` from the same
+   > release before running it:
+   >
+   > ```powershell
+   > Get-FileHash .\overwatch-agent_1.3.3_windows_setup.exe -Algorithm SHA256
+   > ```
 
-3. **Install the service** from an elevated PowerShell (right-click → *Run as
-   administrator*):
+   The installer copies the agent to `C:\Program Files\Overwatch Agent\` and
+   then does exactly what the hand install below does: it registers the
+   `OverwatchAgent` service (display name *Overwatch Site Agent*) to start
+   automatically as `NT AUTHORITY\LocalService`, sets it to restart on failure,
+   creates the data directory `C:\ProgramData\Overwatch Agent\`, takes
+   ownership of it and locks it down to administrators, the system and this
+   service alone, writes a starter configuration to `C:\ProgramData\Overwatch
+   Agent\agent.env`, and adds an **Overwatch Agent Setup** entry to the Start
+   Menu.
 
-   ```powershell
-   cd "C:\Program Files\Overwatch Agent"
-   .\overwatch-agent.exe install
-   ```
-
-   This registers the `OverwatchAgent` service (display name *Overwatch Site
-   Agent*) to start automatically as `NT AUTHORITY\LocalService`, sets it to
-   restart on failure, creates the data directory `C:\ProgramData\Overwatch
-   Agent\`, takes ownership of it and locks it down to administrators, the
-   system and this service alone, writes a starter configuration to
-   `C:\ProgramData\Overwatch Agent\agent.env`, and adds an **Overwatch Agent
-   Setup** entry to the Start Menu. The data directory is recorded on the
-   service's own command line, so the service always uses the one you installed
-   with. `install` prints what it did — read it before moving on.
-
-4. **Set it up.** Open **Overwatch Agent Setup** from the Start Menu (say yes to
-   the administrator prompt). A page opens in your browser with a form:
+3. **Set it up.** Leave *Set this venue up now* ticked on the last page and the
+   setup page opens by itself. (You can also open **Overwatch Agent Setup** from
+   the Start Menu at any time, and say yes to the administrator prompt.) A page
+   opens in your browser with a form:
 
    - **Overwatch address** and **site token** — from Overwatch: *Sites* → edit
      this venue → generate a token. Press **Test this connection**: it tells you
@@ -75,7 +73,49 @@ PC itself is the usual choice; the one thing to know about that is under
 
 Within a minute of starting, the site shows **online** in Overwatch.
 
-### Doing it by hand instead
+### Installing from the archive instead
+
+The installer is a wrapper. If you are deploying by script, or you would rather
+see every step, the per-architecture archives on the same release page install
+the identical agent:
+
+1. **Download** `overwatch-agent_<version>_windows_amd64.zip` (or `_arm64`) and
+   check it against `SHA256SUMS.txt` from the same release:
+
+   ```powershell
+   Get-FileHash .\overwatch-agent_1.3.3_windows_amd64.zip -Algorithm SHA256
+   ```
+
+2. **Extract** it to `C:\Program Files\Overwatch Agent\`. Keep the executable
+   under *Program Files*: the service runs as a limited account that cannot read
+   files in a user's profile.
+
+3. **Register the service** from an elevated PowerShell (right-click → *Run as
+   administrator*):
+
+   ```powershell
+   cd "C:\Program Files\Overwatch Agent"
+   .\overwatch-agent.exe install
+   ```
+
+   This is the same command the installer runs, and it prints what it did — read
+   it before moving on. The data directory is recorded on the service's own
+   command line, so the service always uses the one you installed with.
+
+Then set the venue up from the Start Menu entry as above.
+
+The installer itself takes the usual Inno Setup switches, so a scripted rollout
+can run it unattended:
+
+```powershell
+.\overwatch-agent_1.3.3_windows_setup.exe /VERYSILENT /NORESTART
+```
+
+A silent install registers and configures the service but does not open the
+setup page — fill in `agent.env` by hand or push one out, then `overwatch-agent
+start`.
+
+### Editing the configuration by hand
 
 Everything the page writes is plain text in `agent.env`, and you can edit it
 directly if you prefer. Open it from an elevated prompt, set at least:
@@ -217,24 +257,38 @@ any failure. Restarts are attempted after 5 s, 15 s and then every minute.
 
 ## Upgrading
 
+Run the new installer. It stops the agent, replaces it and starts it again; the
+venue's settings are not asked for a second time.
+
+By hand, from the archive:
+
 1. Download and verify the new release.
 2. `.\overwatch-agent.exe stop`
 3. Replace `overwatch-agent.exe` in `C:\Program Files\Overwatch Agent\`.
 4. `.\overwatch-agent.exe start`
 
-The configuration, cache and log are in the data directory and are untouched.
+Either way the configuration, cache and log are in the data directory and are
+untouched.
 The agent reports its version to Overwatch on its next check-in, so the site's
 agent version updates on the Sites screen.
 
 ## Uninstalling
+
+If you used the installer: **Settings → Apps → Overwatch Site Agent → Uninstall**.
+It stops and removes the service, its event log source and the Start Menu entry,
+then asks whether to delete the data directory as well. Answer **No** if you are
+reinstalling or moving the agent — the site token and the settings are in there.
+
+By hand, or after installing from the archive:
 
 ```powershell
 .\overwatch-agent.exe uninstall
 ```
 
 This stops and removes the service, its event log source and the Start Menu
-entry. The data directory is **left in place** because it holds the site token and cached game
-data; delete `C:\ProgramData\Overwatch Agent\` yourself once you are sure.
+entry. The data directory is **left in place** because it holds the site token
+and cached game data; delete `C:\ProgramData\Overwatch Agent\` yourself once
+you are sure.
 
 ## Security notes
 
@@ -299,3 +353,10 @@ GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath \
 ```
 
 On Windows itself, in PowerShell: `$env:CGO_ENABLED=0; go build -o overwatch-agent.exe ./cmd/agent`.
+
+The installer is [Inno Setup](https://jrsoftware.org/isinfo.php) 6.3 or later
+built from [`packaging/windows/overwatch-agent.iss`](packaging/windows/overwatch-agent.iss),
+which carries both architectures and installs the one the machine can run. It
+takes its payload from the two release archives, so stage those and point the
+compiler at them — the script's own header has the exact commands. CI compiles
+it on every change, so the script is never first exercised at release time.

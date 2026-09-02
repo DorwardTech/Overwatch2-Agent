@@ -6,6 +6,39 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 The Site Agent and central Overwatch are versioned independently.
 
+## [1.3.3] — 2026-09-02
+
+### Added
+
+- **An installer for Windows.** Getting the agent onto a venue's Windows machine
+  ended, until now, in an elevated PowerShell prompt: extract an archive to the
+  right folder, open a terminal as administrator, change directory, type a
+  command. The person doing that is whoever is on shift, and every one of those
+  steps is a way for the install to go wrong quietly — the archive extracted to
+  a Downloads folder the service account cannot read, the prompt not actually
+  elevated, the command typed into the wrong directory.
+
+  `overwatch-agent_<version>_windows_setup.exe` replaces all of it with a file
+  to double-click. It puts the agent in *Program Files*, where the service
+  account can read it, and then runs exactly the same registration step the
+  hand install runs — same service, same locked-down data directory, same
+  starter configuration, same Start Menu entry. When it finishes it offers to
+  open the setup page, so the whole job is one download and one form.
+
+  One installer covers both x64 and Arm64 machines and installs the build the
+  machine can run, so there is no architecture to choose. Upgrading is running
+  the newer one: it stops the agent, replaces it and starts it again, and never
+  asks for the venue's settings a second time. Uninstalling is in Settings →
+  Apps like anything else, and it asks before deleting the site's token, cached
+  games and logs rather than assuming.
+
+  The per-architecture archives are still published for scripted rollouts, and
+  the installer takes the usual silent switches for the same purpose.
+
+  It is not signed with a certificate, so Windows SmartScreen will warn the
+  first time it is run; WINDOWS.md says so plainly and gives the checksum to
+  verify against instead.
+
 ## [1.3.2] — 2026-09-02
 
 ### Fixed

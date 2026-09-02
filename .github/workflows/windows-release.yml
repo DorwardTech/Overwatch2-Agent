@@ -1,8 +1,12 @@
 # Publishes the Windows build of the site agent. Linux venues run the container
 # image (docker-image.yml); Windows venues run this executable as a Windows
-# service (see WINDOWS.md). On a version tag the archives are attached to the
-# GitHub release for that tag. A manual run only uploads them as workflow
-# artifacts, for trying a build before it is released.
+# service (see WINDOWS.md). On a version tag the archives and the installer are
+# attached to the GitHub release for that tag. A manual run only uploads them as
+# workflow artifacts, for trying a build before it is released.
+#
+# Two things are published, and they install the same agent the same way: the
+# .exe installer, which is what a venue should use, and the per-architecture
+# .zip archives for anyone deploying by script or by hand.
 name: Windows release
 
 on:
@@ -67,10 +71,73 @@ jobs:
           path: out/*.zip
           if-no-files-found: error
 
+  installer:
+    name: Build the installer
+    needs: build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      # Same rule as the build job: the tag's version on a release, version.go's
+      # on a manual run. Kept separate rather than passed between jobs because a
+      # job output would be one more thing that can silently disagree.
+      - name: Resolve version
+        id: v
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            v="${GITHUB_REF#refs/tags/v}"
+          else
+            v=$(sed -n 's/^var Value = "\(.*\)"$/\1/p' internal/version/version.go)
+          fi
+          [ -n "$v" ] || { echo "could not determine the version"; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      # The installer carries both builds and installs the one the machine can
+      # run, so a venue has a single thing to download. The archives already
+      # hold the executable and the documents that ship beside it, so they are
+      # the payload rather than a second assembly of the same files.
+      - name: Stage the release archives
+        shell: pwsh
+        run: |
+          $v = "${{ steps.v.outputs.version }}"
+          foreach ($arch in 'amd64', 'arm64') {
+            $zip = "artifacts/overwatch-agent_${v}_windows_${arch}.zip"
+            if (-not (Test-Path $zip)) { throw "missing $zip" }
+            Expand-Archive -Path $zip -DestinationPath "stage/$arch" -Force
+          }
+
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress --yes
+
+      - name: Compile the installer
+        shell: pwsh
+        run: |
+          $v = "${{ steps.v.outputs.version }}"
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" `
+            "/DAppVersion=$v" `
+            "/DAmd64Dir=stage\amd64\overwatch-agent_${v}_windows_amd64" `
+            "/DArm64Dir=stage\arm64\overwatch-agent_${v}_windows_arm64" `
+            "/DOutDir=out" `
+            "packaging\windows\overwatch-agent.iss"
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with $LASTEXITCODE" }
+          Get-ChildItem out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: overwatch-agent_${{ steps.v.outputs.version }}_windows_setup
+          path: out/*.exe
+          if-no-files-found: error
+
   release:
     name: Attach to release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    needs: [build, installer]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -83,7 +150,7 @@ jobs:
       - name: Checksums
         run: |
           cd out
-          sha256sum *.zip > SHA256SUMS.txt
+          sha256sum *.exe *.zip > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
       # The release notes are this version's section of the changelog.
@@ -100,4 +167,4 @@ jobs:
           tag="${GITHUB_REF#refs/tags/}"
           gh release view "$tag" >/dev/null 2>&1 \
             || gh release create "$tag" --title "Site Agent ${tag#v}" --notes-file notes.md
-          gh release upload "$tag" out/*.zip out/SHA256SUMS.txt --clobber
+          gh release upload "$tag" out/*.exe out/*.zip out/SHA256SUMS.txt --clobber
