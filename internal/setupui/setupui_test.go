@@ -272,3 +272,67 @@ func TestFinishStopsTheServer(t *testing.T) {
 		t.Error("finishing did not stop the server")
 	}
 }
+
+// The test buttons dial what they are given, so what they are given has to be
+// an address the agent would actually have been configured with — and when it
+// is not, the page has to say which part of it is wrong.
+func TestCentralTestRejectsAnAddressTheAgentCouldNotUse(t *testing.T) {
+	cases := []struct {
+		name, url, expect string
+	}{
+		{"no scheme", "overwatch.example.com/api/agent/ingest", "must start with https://"},
+		{"wrong scheme", "file:///etc/passwd", "must start with https://"},
+		{"no host", "https:///api/agent/ingest", "missing the server name"},
+		{"credentials in the address", "https://someone:secret@overwatch.example.com/api/agent/ingest", "Remove the username and password"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s, h := newTestServer(t, filepath.Join(t.TempDir(), "agent.env"))
+			body, _ := json.Marshal(map[string]string{"url": c.url, "token": "OW2_1_abc"})
+			got := decode(t, do(t, h, http.MethodPost, "/api/test/central", s.key, string(body)))
+
+			if got["ok"] != false {
+				t.Fatalf("ok = %v, want false", got["ok"])
+			}
+			if msg, _ := got["message"].(string); !strings.Contains(msg, c.expect) {
+				t.Errorf("message = %q, want it to mention %q", msg, c.expect)
+			}
+		})
+	}
+}
+
+func TestGameServerTestRejectsAnAddressTheAgentCouldNotDial(t *testing.T) {
+	cases := []struct {
+		name, host, port, expect string
+	}{
+		{"a web address", "http://127.0.0.1", "12113", "not a web address"},
+		{"a path", "127.0.0.1/telemetry", "12113", "not a web address"},
+		{"host and port together", "127.0.0.1:12113", "12113", "port field"},
+		{"port out of range", "127.0.0.1", "99999", "between 1 and 65535"},
+		{"port not a number", "127.0.0.1", "twelve", "between 1 and 65535"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s, h := newTestServer(t, filepath.Join(t.TempDir(), "agent.env"))
+			body, _ := json.Marshal(map[string]string{"host": c.host, "port": c.port})
+			got := decode(t, do(t, h, http.MethodPost, "/api/test/gameserver", s.key, string(body)))
+
+			if got["ok"] != false {
+				t.Fatalf("ok = %v, want false", got["ok"])
+			}
+			if msg, _ := got["message"].(string); !strings.Contains(msg, c.expect) {
+				t.Errorf("message = %q, want it to mention %q", msg, c.expect)
+			}
+		})
+	}
+}
+
+// An IPv6 literal has colons in it and is a perfectly good address to dial;
+// the check that catches "host:port" must not catch it.
+func TestGameServerTestAcceptsAnIPv6Address(t *testing.T) {
+	for _, host := range []string{"::1", "2001:db8::1", "127.0.0.1", "ozone-pc.venue.local"} {
+		if problem := gameServerProblem(host, "12113"); problem != "" {
+			t.Errorf("gameServerProblem(%q) = %q, want no problem", host, problem)
+		}
+	}
+}

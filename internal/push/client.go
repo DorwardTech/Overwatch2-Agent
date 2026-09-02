@@ -110,6 +110,19 @@ func New(ingestURL, token string) *Pusher {
 		token:       token,
 		client: &http.Client{
 			Timeout: 15 * time.Second,
+			// Do not follow redirects. The site token travels in X-Agent-Token,
+			// a header of our own, and Go only strips the ones it recognises as
+			// credentials (Authorization, Cookie) when a redirect crosses to
+			// another host — a custom header is carried along to wherever
+			// Location points. Central never answers a redirect, so one means
+			// the configured address is not central: a typo, a parked domain,
+			// an HTTP-to-HTTPS redirector somebody else operates. Handing the
+			// venue's token to that host is the outcome worth ruling out, so
+			// the 3xx is returned as-is and the caller reports it like any
+			// other unexpected status.
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
 		},
 	}
 }

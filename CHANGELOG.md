@@ -6,6 +6,31 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 The Site Agent and central Overwatch are versioned independently.
 
+## [1.3.1] — 2026-09-02
+
+### Fixed
+
+- **A redirect can no longer carry the site token somewhere else.** The agent
+  identifies itself to Overwatch with a token in a header of its own. When a
+  redirect crosses to another host, Go strips the headers it recognises as
+  credentials — but not one of ours, so it was carried to whatever host the
+  redirect named. A mistyped address, a lapsed domain or somebody else's
+  HTTP-to-HTTPS redirector was enough to hand a venue's token to a stranger.
+
+  Overwatch never answers with a redirect, so one means the address is not
+  Overwatch. The agent now treats it that way: nothing is sent on to the new
+  location, and the redirect is reported like any other unexpected answer.
+
+### Changed
+
+- **The setup page checks an address before it dials it.** Saving already
+  refused an Overwatch address that was not a web address; the test button did
+  not, so pressing it on a pasted fragment produced whatever low-level error
+  came back from the attempt. Both now apply the same rule, and the page names
+  the part that is wrong: a missing `https://`, a missing server name, a
+  username and password left in the address, a port typed into the address
+  field, or a port outside 1–65535.
+
 ## [1.3.0] — 2026-09-02
 
 ### Added

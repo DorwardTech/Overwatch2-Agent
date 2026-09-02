@@ -29,8 +29,10 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -313,11 +315,10 @@ func (s settings) vars() []config.EnvVar {
 // the operator needs to fix it.
 func (s settings) validate() []string {
 	var problems []string
-	switch {
-	case strings.TrimSpace(s.CentralURL) == "":
+	if strings.TrimSpace(s.CentralURL) == "" {
 		problems = append(problems, "The Overwatch address is required.")
-	case !strings.HasPrefix(s.CentralURL, "http://") && !strings.HasPrefix(s.CentralURL, "https://"):
-		problems = append(problems, "The Overwatch address must start with https://")
+	} else if problem := centralURLProblem(s.CentralURL); problem != "" {
+		problems = append(problems, problem)
 	}
 	if strings.TrimSpace(s.Token) == "" {
 		problems = append(problems, "The site token is required — copy it from the Sites screen in Overwatch.")
@@ -354,6 +355,52 @@ func (s settings) validate() []string {
 		problems = append(problems, "The control panel needs a password as well as an address.")
 	}
 	return problems
+}
+
+// centralURLProblem describes what is wrong with an Overwatch address, or
+// returns "" when there is nothing wrong with it.
+//
+// Both the save button and the test button run this, and that is the point: the
+// test button dials whatever it is handed, so the address it will dial has to
+// be one the agent would actually have been configured with. It is not much of
+// a gate — the operator is entitled to name their own server — but it keeps a
+// pasted fragment, a file:// path or an address carrying somebody's credentials
+// from becoming an outbound connection, and it says which of those it was.
+func centralURLProblem(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return "That does not look like a web address. It should look like https://overwatch.example.com/api/agent/ingest"
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return "The Overwatch address must start with https://"
+	}
+	if u.Host == "" {
+		return "The Overwatch address is missing the server name — it should look like https://overwatch.example.com/api/agent/ingest"
+	}
+	if u.User != nil {
+		return "Remove the username and password from the Overwatch address; the site token is what identifies this venue."
+	}
+	return ""
+}
+
+// gameServerProblem describes what is wrong with a game server address and
+// port, or returns "" when there is nothing wrong with them.
+//
+// The field is a bare host, because a bare host is what gets dialled. Anything
+// with a scheme or a path in it was pasted from somewhere else and would fail
+// with a confusing error much later, so say so here instead.
+func gameServerProblem(host, port string) string {
+	if strings.ContainsAny(host, "/\\@ \t") {
+		return `The game server address should be just the machine's name or its IP — "127.0.0.1", not a web address.`
+	}
+	if strings.Contains(host, ":") && net.ParseIP(host) == nil {
+		return `Put the game server's port in the port field, not in the address — the address is just "127.0.0.1".`
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil || n < 1 || n > 65535 {
+		return "The game server port must be a number between 1 and 65535."
+	}
+	return ""
 }
 
 func allDigits(v string) bool {
@@ -474,12 +521,17 @@ func (s *Server) handleTestCentral(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
 	}
-	if strings.TrimSpace(in.URL) == "" || strings.TrimSpace(in.Token) == "" {
+	rawURL, token := strings.TrimSpace(in.URL), strings.TrimSpace(in.Token)
+	if rawURL == "" || token == "" {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "message": "Fill in the Overwatch address and the site token first."})
 		return
 	}
+	if problem := centralURLProblem(rawURL); problem != "" {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "message": problem})
+		return
+	}
 
-	err := push.New(strings.TrimSpace(in.URL), strings.TrimSpace(in.Token)).Probe()
+	err := push.New(rawURL, token).Probe()
 	if err == nil {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "Connected to Overwatch and the site token was accepted."})
 		return
@@ -520,6 +572,10 @@ func (s *Server) handleTestGameServer(w http.ResponseWriter, r *http.Request) {
 	}
 	if port == "" {
 		port = "12113"
+	}
+	if problem := gameServerProblem(host, port); problem != "" {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "message": problem})
+		return
 	}
 
 	client, err := ozone.Dial(host, port)
