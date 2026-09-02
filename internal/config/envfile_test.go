@@ -87,3 +87,89 @@ func TestLoadEnvFileMissing(t *testing.T) {
 		t.Fatalf("err = %v, want fs.ErrNotExist so an optional default file can be skipped", err)
 	}
 }
+
+func TestMergeEnvKeepsEverythingItDoesNotManage(t *testing.T) {
+	existing := `# Overwatch agent — venue 12
+# Support note: the game server moved racks in June.
+
+CENTRAL_API_URL=https://old.example/api/agent/ingest
+AGENT_TOKEN=OW2_old
+
+# ADMIN_API_ADDR=:8090      # the control panel, if we ever turn it on
+NEXUS_DSN=user:pw@tcp(10.0.0.5:3306)/ng_system
+`
+	got := MergeEnv(existing, []EnvVar{
+		{Key: "CENTRAL_API_URL", Value: "https://ow2.example/api/agent/ingest"},
+		{Key: "AGENT_TOKEN", Value: "OW2_new"},
+		{Key: "ADMIN_API_ADDR", Value: "0.0.0.0:8097"},
+		{Key: "ENABLE_CACHE", Value: "true"},
+	})
+
+	want := `# Overwatch agent — venue 12
+# Support note: the game server moved racks in June.
+
+CENTRAL_API_URL=https://ow2.example/api/agent/ingest
+AGENT_TOKEN=OW2_new
+
+ADMIN_API_ADDR=0.0.0.0:8097
+NEXUS_DSN=user:pw@tcp(10.0.0.5:3306)/ng_system
+
+# --- Added by the setup page ---
+ENABLE_CACHE=true
+`
+	if got != want {
+		t.Errorf("MergeEnv =\n%q\nwant\n%q", got, want)
+	}
+}
+
+func TestMergeEnvRoundTripsThroughTheParser(t *testing.T) {
+	updates := []EnvVar{
+		{Key: "AGENT_TOKEN", Value: "OW2_1_s#cret"},
+		{Key: "CACHE_DIR", Value: `C:\ProgramData\Overwatch Agent\cache`},
+		{Key: "SPACED", Value: " leading and trailing "},
+	}
+	merged := MergeEnv("", updates)
+
+	parsed, err := ParseEnv(strings.NewReader(merged))
+	if err != nil {
+		t.Fatalf("the merged file does not parse: %v\n%s", err, merged)
+	}
+	got := map[string]string{}
+	for _, v := range parsed {
+		got[v.Key] = v.Value
+	}
+	for _, u := range updates {
+		if got[u.Key] != u.Value {
+			t.Errorf("%s round-tripped as %q, want %q", u.Key, got[u.Key], u.Value)
+		}
+	}
+}
+
+func TestMergeEnvEmptyValueCommentsOutAndCanBeRestored(t *testing.T) {
+	// Unticking an option must not throw away what was there: the value stays
+	// visible behind a comment marker, and ticking it again finds it.
+	off := MergeEnv("ADMIN_API_ADDR=0.0.0.0:8097\n", []EnvVar{{Key: "ADMIN_API_ADDR", Value: ""}})
+	if off != "# ADMIN_API_ADDR=0.0.0.0:8097\n" {
+		t.Fatalf("turning the setting off gave %q", off)
+	}
+	on := MergeEnv(off, []EnvVar{{Key: "ADMIN_API_ADDR", Value: "0.0.0.0:9000"}})
+	if on != "ADMIN_API_ADDR=0.0.0.0:9000\n" {
+		t.Errorf("turning it back on gave %q", on)
+	}
+	vars, err := ParseEnv(strings.NewReader(off))
+	if err != nil || len(vars) != 0 {
+		t.Errorf("the commented-out file should define nothing; got %v (err %v)", vars, err)
+	}
+}
+
+func TestMergeEnvDoesNotDuplicateOnRepeatedSaves(t *testing.T) {
+	updates := []EnvVar{{Key: "OZONE_WS_HOST", Value: "10.0.0.5"}}
+	once := MergeEnv("# a comment\n", updates)
+	twice := MergeEnv(once, updates)
+	if once != twice {
+		t.Errorf("saving twice changed the file:\nfirst:\n%q\nsecond:\n%q", once, twice)
+	}
+	if strings.Count(twice, "OZONE_WS_HOST=") != 1 {
+		t.Errorf("the setting appears more than once:\n%s", twice)
+	}
+}

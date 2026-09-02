@@ -110,6 +110,19 @@ func New(ingestURL, token string) *Pusher {
 		token:       token,
 		client: &http.Client{
 			Timeout: 15 * time.Second,
+			// Do not follow redirects. The site token travels in X-Agent-Token,
+			// a header of our own, and Go only strips the ones it recognises as
+			// credentials (Authorization, Cookie) when a redirect crosses to
+			// another host — a custom header is carried along to wherever
+			// Location points. Central never answers a redirect, so one means
+			// the configured address is not central: a typo, a parked domain,
+			// an HTTP-to-HTTPS redirector somebody else operates. Handing the
+			// venue's token to that host is the outcome worth ruling out, so
+			// the 3xx is returned as-is and the caller reports it like any
+			// other unexpected status.
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
 		},
 	}
 }
@@ -275,6 +288,29 @@ func (p *Pusher) post(endpoint string, payload []byte, idempotencyKey string) er
 	req.Header.Set("User-Agent", "OverwatchAgent/2.0")
 
 	resp, err := p.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return &HTTPError{StatusCode: resp.StatusCode}
+	}
+	return nil
+}
+
+// Probe checks that central is reachable and that this token is accepted,
+// without sending anything. It asks for the site's pending command queue: a
+// read-only endpoint behind the same token check as ingestion, so a success
+// proves the whole path — URL, network, TLS and token — while writing no
+// telemetry. Testing with a real push would file a fabricated batch against
+// the venue every time somebody pressed the button.
+//
+// A non-2xx response is returned as *HTTPError so the caller can tell a
+// rejected token (401/403) from a mistyped URL (404) from central being unwell.
+func (p *Pusher) Probe() error {
+	resp, err := p.get(p.commandsURL)
 	if err != nil {
 		return err
 	}

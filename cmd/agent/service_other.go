@@ -5,6 +5,8 @@ package main
 import (
 	"fmt"
 	"os"
+
+	"overwatch/agent/internal/setupui"
 )
 
 // The service commands exist only on Windows. Everywhere else the container
@@ -21,3 +23,21 @@ func serviceCommand(cmd string, _ options) int {
 }
 
 func reportServiceError(string) {}
+
+// serviceControl is what the setup page can drive. There is no service manager
+// to speak to here, so it reports itself unsupported and the page confines
+// itself to writing the configuration.
+func serviceControl(options) setupui.Service { return nil }
+
+// prepareStorage makes sure the data directory exists. On Windows the
+// equivalent also locks its permissions down; here the deployment (a container
+// with a mounted volume, or systemd) owns that.
+func prepareStorage(dataDir string) error {
+	if dataDir == "" {
+		return nil
+	}
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		return fmt.Errorf("create %s: %w", dataDir, err)
+	}
+	return nil
+}

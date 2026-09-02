@@ -232,3 +232,36 @@ func TestUnsendable(t *testing.T) {
 		t.Error("no error is not a rejection")
 	}
 }
+
+// A redirect must never carry the site token to the host it names. Go strips
+// Authorization and Cookie when a redirect crosses hosts, but X-Agent-Token is
+// ours, so it would be sent verbatim to whatever answered — which is how a
+// mistyped address or a parked domain turns into a leaked venue credential.
+func TestRedirectsAreNotFollowed(t *testing.T) {
+	var elsewhereHits int
+	var leaked string
+	elsewhere := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		elsewhereHits++
+		leaked = r.Header.Get("X-Agent-Token")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer elsewhere.Close()
+
+	central := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, elsewhere.URL+r.URL.Path, http.StatusFound)
+	}))
+	defer central.Close()
+
+	err := New(central.URL+"/api/agent/ingest", "site-token").Probe()
+
+	if elsewhereHits != 0 {
+		t.Fatalf("followed the redirect: %d request(s) to the other host, token %q", elsewhereHits, leaked)
+	}
+	var httpErr *HTTPError
+	if !errors.As(err, &httpErr) {
+		t.Fatalf("Probe() error = %v, want *HTTPError", err)
+	}
+	if httpErr.StatusCode != http.StatusFound {
+		t.Errorf("StatusCode = %d, want %d", httpErr.StatusCode, http.StatusFound)
+	}
+}

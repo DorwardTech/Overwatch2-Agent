@@ -57,6 +57,7 @@ const usageText = `Usage: overwatch-agent [command] [flags]
 
 Commands:
   run          run the agent (default)
+  setup        open the configuration page in a browser
   healthcheck  exit 0 if the running agent's health endpoint answers
   version      print the agent version
   install      install the Windows service           (Windows, elevated)
@@ -66,7 +67,7 @@ Commands:
   restart      stop, then start the Windows service  (Windows, elevated)
   status       show the Windows service state
 
-Flags (run, install, healthcheck):
+Flags (run, setup, install, healthcheck):
   --config PATH    KEY=VALUE configuration file (default: <data-dir>\agent.env;
                    environment variables take precedence over the file)
   --data-dir PATH  data directory for the cache, buffer, log and config
@@ -92,6 +93,8 @@ func main() {
 	switch cmd {
 	case "run":
 		os.Exit(runAgent(opts))
+	case "setup":
+		os.Exit(runSetup(opts))
 	case "healthcheck":
 		os.Exit(healthcheck(opts))
 	case "version":

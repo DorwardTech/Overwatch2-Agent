@@ -1,0 +1,387 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Overwatch Agent — Setup</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f5f6f8; --card: #ffffff; --ink: #1a1d21; --muted: #5b6470;
+    --line: #dfe3e8; --brand: #1b6ef3; --ok: #1a7f45; --bad: #b3261e; --warn: #8a5a00;
+    --okbg: #e8f5ed; --badbg: #fdeceb; --warnbg: #fdf4e3;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16181c; --card: #1e2126; --ink: #e8eaed; --muted: #9aa3af;
+      --line: #2e333b; --brand: #5b9bff; --ok: #5ac489; --bad: #ff8b82; --warn: #e3b055;
+      --okbg: #16301f; --badbg: #301a18; --warnbg: #2c2413;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.55 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  main { max-width: 760px; margin: 0 auto; padding: 28px 20px 140px; }
+  h1 { font-size: 24px; margin: 0 0 4px; }
+  h2 { font-size: 17px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 24px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 20px; margin-bottom: 16px; }
+  .card > p.hint { color: var(--muted); margin: 0 0 16px; font-size: 14px; }
+  label { display: block; font-weight: 600; margin: 14px 0 5px; }
+  label .var { font-weight: 400; color: var(--muted); font-size: 13px; }
+  input[type=text], input[type=password] {
+    width: 100%; padding: 9px 11px; border: 1px solid var(--line); border-radius: 8px;
+    background: var(--bg); color: var(--ink); font: inherit; font-size: 15px;
+  }
+  input:focus { outline: 2px solid var(--brand); outline-offset: 1px; }
+  .row { display: flex; gap: 10px; align-items: flex-start; flex-wrap: wrap; }
+  .row > * { flex: 1 1 200px; }
+  .row > .narrow { flex: 0 0 130px; }
+  .checkline { display: flex; gap: 10px; align-items: flex-start; margin: 16px 0 0; }
+  .checkline input { margin-top: 4px; flex: none; width: 17px; height: 17px; accent-color: var(--brand); }
+  .checkline label { margin: 0; }
+  .checkline .desc { font-weight: 400; color: var(--muted); font-size: 14px; display: block; margin-top: 2px; }
+  button {
+    font: inherit; font-weight: 600; padding: 9px 16px; border-radius: 8px;
+    border: 1px solid var(--line); background: var(--card); color: var(--ink); cursor: pointer;
+  }
+  button:hover { border-color: var(--brand); }
+  button:disabled { opacity: .55; cursor: default; border-color: var(--line); }
+  button.primary { background: var(--brand); border-color: var(--brand); color: #fff; }
+  button.link { border: none; background: none; color: var(--brand); padding: 4px 0; text-decoration: underline; }
+  .msg { margin-top: 12px; padding: 10px 12px; border-radius: 8px; font-size: 14px; display: none; }
+  .msg.show { display: block; }
+  .msg.ok { background: var(--okbg); color: var(--ok); }
+  .msg.bad { background: var(--badbg); color: var(--bad); }
+  .msg.warn { background: var(--warnbg); color: var(--warn); }
+  .msg ul { margin: 6px 0 0 18px; padding: 0; }
+  details { margin-top: 8px; }
+  summary { cursor: pointer; font-weight: 600; }
+  footer {
+    position: fixed; left: 0; right: 0; bottom: 0; background: var(--card);
+    border-top: 1px solid var(--line); padding: 14px 20px;
+  }
+  .footinner { max-width: 760px; margin: 0 auto; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  .state { color: var(--muted); font-size: 14px; margin-right: auto; }
+  .state b { color: var(--ink); }
+  pre {
+    background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 12px;
+    overflow: auto; max-height: 260px; font-size: 12.5px; margin: 12px 0 0; white-space: pre-wrap;
+  }
+  code { background: var(--bg); padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  .paths { color: var(--muted); font-size: 13px; margin-top: 20px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Overwatch Agent setup</h1>
+  <p class="sub">Fill this in once. Test each connection, then save and start the agent.</p>
+
+  <div class="card">
+    <h2>1. Connect to Overwatch</h2>
+    <p class="hint">Both of these come from Overwatch: open the site, go to <b>Sites</b>, edit this venue, and generate a token.</p>
+
+    <label for="central">Overwatch address <span class="var">CENTRAL_API_URL</span></label>
+    <input id="central" type="text" spellcheck="false" placeholder="https://ow2.lasertag.net.au/api/agent/ingest">
+
+    <label for="token">Site token <span class="var">AGENT_TOKEN</span></label>
+    <div class="row">
+      <input id="token" type="password" spellcheck="false" autocomplete="off" placeholder="OW2_...">
+      <button type="button" class="narrow" id="reveal">Show</button>
+    </div>
+
+    <div class="row" style="margin-top:14px">
+      <button type="button" id="testCentral">Test this connection</button>
+    </div>
+    <div class="msg" id="centralMsg"></div>
+  </div>
+
+  <div class="card">
+    <h2>2. The game server</h2>
+    <p class="hint">Where the laser-tag game server runs. If the agent is installed on that same computer, use <code>127.0.0.1</code>.</p>
+
+    <div class="row">
+      <div>
+        <label for="ozoneHost">Game server address <span class="var">OZONE_WS_HOST</span></label>
+        <input id="ozoneHost" type="text" spellcheck="false" placeholder="127.0.0.1">
+      </div>
+      <div class="narrow">
+        <label for="ozonePort">Port <span class="var">OZONE_WS_PORT</span></label>
+        <input id="ozonePort" type="text" spellcheck="false" placeholder="12113">
+      </div>
+    </div>
+    <button type="button" class="link" id="thisMachine">Use this computer (127.0.0.1)</button>
+
+    <div class="row" style="margin-top:8px">
+      <button type="button" id="testGame">Test this connection</button>
+    </div>
+    <div class="msg" id="gameMsg"></div>
+  </div>
+
+  <div class="card">
+    <h2>3. What the agent should do</h2>
+    <p class="hint">Leave these as they are unless you have been told otherwise.</p>
+
+    <div class="checkline">
+      <input type="checkbox" id="results">
+      <label for="results">Collect scoresheets after each game
+        <span class="desc">Sends hit-zone and fitness data to Overwatch when a game finishes. Needs the scoresheet-printing licence on the game server.</span>
+      </label>
+    </div>
+
+    <div class="checkline">
+      <input type="checkbox" id="cache">
+      <label for="cache">Keep a local copy of finished games, and serve them to the scoresheet printer
+        <span class="desc">The agent collects finished games while the venue is idle and answers the printing software from its own copy, so the game server is never asked for data during play.</span>
+      </label>
+    </div>
+    <div id="proxyBox" style="display:none">
+      <label for="proxyAddr">Where the printing software should connect <span class="var">PROXY_LISTEN_ADDR</span></label>
+      <input id="proxyAddr" type="text" spellcheck="false" placeholder="0.0.0.0:12124">
+      <div class="msg warn show" id="proxyWarn" style="display:none"></div>
+    </div>
+
+    <div class="checkline">
+      <input type="checkbox" id="admin">
+      <label for="admin">Allow staff to open the agent's control panel in a browser
+        <span class="desc">A page on the venue network showing what the agent is doing. It is protected by the password below.</span>
+      </label>
+    </div>
+    <div id="adminBox" style="display:none">
+      <div class="row">
+        <div>
+          <label for="adminAddr">Control panel address <span class="var">ADMIN_API_ADDR</span></label>
+          <input id="adminAddr" type="text" spellcheck="false" placeholder="0.0.0.0:8097">
+        </div>
+        <div>
+          <label for="adminToken">Control panel password <span class="var">ADMIN_API_TOKEN</span></label>
+          <input id="adminToken" type="text" spellcheck="false">
+        </div>
+      </div>
+      <button type="button" class="link" id="genAdmin">Make me a strong password</button>
+    </div>
+
+    <details>
+      <summary>Advanced timings</summary>
+      <div class="row">
+        <div>
+          <label for="poll">During a game, seconds <span class="var">POLL_INTERVAL</span></label>
+          <input id="poll" type="text" spellcheck="false" placeholder="5">
+        </div>
+        <div>
+          <label for="idle">When idle, seconds <span class="var">IDLE_POLL_INTERVAL</span></label>
+          <input id="idle" type="text" spellcheck="false" placeholder="15">
+        </div>
+        <div>
+          <label for="slow">Background, seconds <span class="var">SLOW_POLL_INTERVAL</span></label>
+          <input id="slow" type="text" spellcheck="false" placeholder="60">
+        </div>
+      </div>
+      <label for="health">Health address <span class="var">HEALTH_ADDR</span></label>
+      <input id="health" type="text" spellcheck="false" placeholder="127.0.0.1:8088">
+      <div class="msg warn show" style="display:block;margin-top:10px">Keep the idle figure below 30 seconds, or Overwatch will keep marking this venue offline between updates.</div>
+    </details>
+  </div>
+
+  <div class="card" id="logCard">
+    <h2>The agent's log</h2>
+    <p class="hint">The newest lines, so you can watch it connect.</p>
+    <button type="button" id="refreshLog">Refresh</button>
+    <pre id="log">Press Refresh.</pre>
+  </div>
+
+  <p class="paths">
+    Settings file: <code>{{.ConfigPath}}</code><br>
+    Log file: <code>{{.LogPath}}</code>
+  </p>
+</main>
+
+<footer>
+  <div class="footinner">
+    <span class="state" id="state">&nbsp;</span>
+    <button type="button" id="save">Save settings</button>
+    <button type="button" class="primary" id="saveStart">Save and start the agent</button>
+    <button type="button" id="finish">Finish</button>
+  </div>
+  <div class="footinner"><div class="msg" id="saveMsg" style="flex:1 1 100%"></div></div>
+</footer>
+
+<script>
+const KEY = "{{.Key}}";
+const HAS_SERVICE = {{if .Service}}true{{else}}false{{end}};
+const $ = (id) => document.getElementById(id);
+
+const FIELDS = {
+  CENTRAL_API_URL: "central", AGENT_TOKEN: "token",
+  OZONE_WS_HOST: "ozoneHost", OZONE_WS_PORT: "ozonePort",
+  PROXY_LISTEN_ADDR: "proxyAddr", ADMIN_API_ADDR: "adminAddr", ADMIN_API_TOKEN: "adminToken",
+  POLL_INTERVAL: "poll", IDLE_POLL_INTERVAL: "idle", SLOW_POLL_INTERVAL: "slow", HEALTH_ADDR: "health",
+};
+const DEFAULTS = {
+  CENTRAL_API_URL: "https://ow2.lasertag.net.au/api/agent/ingest",
+  OZONE_WS_HOST: "127.0.0.1", OZONE_WS_PORT: "12113",
+  PROXY_LISTEN_ADDR: "0.0.0.0:12124", ADMIN_API_ADDR: "0.0.0.0:8097",
+  POLL_INTERVAL: "5", IDLE_POLL_INTERVAL: "15", SLOW_POLL_INTERVAL: "60", HEALTH_ADDR: "127.0.0.1:8088",
+};
+
+async function api(path, options = {}) {
+  const res = await fetch(path, {
+    ...options,
+    headers: { "X-Setup-Key": KEY, "Content-Type": "application/json", ...(options.headers || {}) },
+  });
+  let body = {};
+  try { body = await res.json(); } catch (e) { /* an error page, not JSON */ }
+  if (!res.ok && body.error) throw new Error(body.error);
+  if (!res.ok && !body.problems) throw new Error("The setup page returned an error (" + res.status + ").");
+  return body;
+}
+
+function show(el, kind, html) {
+  el.className = "msg show " + kind;
+  el.style.display = "block";
+  el.innerHTML = html;
+}
+function hide(el) { el.className = "msg"; el.style.display = "none"; }
+function escapeHTML(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+function truthy(v) { return String(v).toLowerCase() === "true" || v === "1"; }
+
+async function load() {
+  const body = await api("/api/config");
+  const v = body.values || {};
+  for (const [key, id] of Object.entries(FIELDS)) {
+    $(id).value = v[key] !== undefined && v[key] !== "" ? v[key] : (DEFAULTS[key] || "");
+  }
+  $("results").checked = v.ENABLE_GAME_RESULTS === undefined ? true : truthy(v.ENABLE_GAME_RESULTS);
+  $("cache").checked = truthy(v.ENABLE_CACHE);
+  $("admin").checked = !!(v.ADMIN_API_ADDR && v.ADMIN_API_TOKEN);
+  toggles();
+  if (body.warning) show($("saveMsg"), "warn", escapeHTML(body.warning));
+  refreshState();
+}
+
+function toggles() {
+  $("proxyBox").style.display = $("cache").checked ? "block" : "none";
+  $("adminBox").style.display = $("admin").checked ? "block" : "none";
+  const addr = $("proxyAddr").value || "";
+  const clash = addr.endsWith(":12123");
+  const local = ["127.0.0.1", "localhost", "::1"].includes(($("ozoneHost").value || "").trim());
+  $("proxyWarn").style.display = clash && local ? "block" : "none";
+  if (clash && local) {
+    $("proxyWarn").textContent = "Port 12123 already belongs to the game server on this computer, so the agent cannot use it. Pick another port — 12124 works — and set the printing software to match.";
+  }
+}
+
+function collect() {
+  const s = {};
+  for (const [key, id] of Object.entries(FIELDS)) s[key] = $(id).value.trim();
+  s.ENABLE_GAME_RESULTS = String($("results").checked);
+  const cache = $("cache").checked;
+  s.ENABLE_CACHE = String(cache);
+  s.ENABLE_PROXY = String(cache);
+  s.ENABLE_MSG_BUS = String(cache);
+  if (!cache) s.PROXY_LISTEN_ADDR = "";
+  if (!$("admin").checked) { s.ADMIN_API_ADDR = ""; s.ADMIN_API_TOKEN = ""; }
+  return s;
+}
+
+async function save() {
+  hide($("saveMsg"));
+  const body = await api("/api/config", { method: "POST", body: JSON.stringify(collect()) });
+  if (body.problems) {
+    show($("saveMsg"), "bad", "Please fix these first:<ul>" + body.problems.map((p) => "<li>" + escapeHTML(p) + "</li>").join("") + "</ul>");
+    return false;
+  }
+  show($("saveMsg"), "ok", "Saved to " + escapeHTML(body.path) + ".");
+  return true;
+}
+
+async function refreshState() {
+  if (!HAS_SERVICE) { $("state").textContent = "Run the agent yourself once the settings are saved."; return; }
+  try {
+    const s = await api("/api/service");
+    $("state").innerHTML = s.installed ? "Agent service: <b>" + escapeHTML(s.state) + "</b>" : "Agent service: <b>not installed</b>";
+  } catch (e) { $("state").textContent = ""; }
+}
+
+async function busy(button, work) {
+  const label = button.textContent;
+  button.disabled = true; button.textContent = "Working…";
+  try { await work(); }
+  catch (e) { show($("saveMsg"), "bad", escapeHTML(e.message)); }
+  finally { button.disabled = false; button.textContent = label; }
+}
+
+$("reveal").addEventListener("click", () => {
+  const t = $("token");
+  const showing = t.type === "text";
+  t.type = showing ? "password" : "text";
+  $("reveal").textContent = showing ? "Show" : "Hide";
+});
+$("thisMachine").addEventListener("click", () => { $("ozoneHost").value = "127.0.0.1"; toggles(); });
+$("genAdmin").addEventListener("click", () => {
+  const bytes = new Uint8Array(18);
+  crypto.getRandomValues(bytes);
+  $("adminToken").value = btoa(String.fromCharCode(...bytes)).replace(/[+/=]/g, "").slice(0, 20);
+});
+$("cache").addEventListener("change", toggles);
+$("admin").addEventListener("change", toggles);
+$("proxyAddr").addEventListener("input", toggles);
+$("ozoneHost").addEventListener("input", toggles);
+
+$("testCentral").addEventListener("click", (e) => busy(e.target, async () => {
+  hide($("centralMsg"));
+  const r = await api("/api/test/central", {
+    method: "POST",
+    body: JSON.stringify({ url: $("central").value.trim(), token: $("token").value.trim() }),
+  });
+  show($("centralMsg"), r.ok ? "ok" : "bad", escapeHTML(r.message));
+}));
+
+$("testGame").addEventListener("click", (e) => busy(e.target, async () => {
+  hide($("gameMsg"));
+  const r = await api("/api/test/gameserver", {
+    method: "POST",
+    body: JSON.stringify({ host: $("ozoneHost").value.trim(), port: $("ozonePort").value.trim() }),
+  });
+  show($("gameMsg"), r.ok ? "ok" : "bad", escapeHTML(r.message));
+}));
+
+$("save").addEventListener("click", (e) => busy(e.target, save));
+
+$("saveStart").addEventListener("click", (e) => busy(e.target, async () => {
+  if (!(await save())) return;
+  if (!HAS_SERVICE) return;
+  const s = await api("/api/service");
+  const action = !s.installed ? "install" : (s.state === "running" ? "restart" : "start");
+  const after = await api("/api/service", { method: "POST", body: JSON.stringify({ action }) });
+  if (after.error) {
+    show($("saveMsg"), "bad", "Saved, but the agent would not " + action + ": " + escapeHTML(after.error));
+  } else if (action === "install") {
+    const started = await api("/api/service", { method: "POST", body: JSON.stringify({ action: "start" }) });
+    show($("saveMsg"), started.error ? "bad" : "ok", started.error ? escapeHTML(started.error) : "Saved, installed and started. Check the log below.");
+  } else {
+    show($("saveMsg"), "ok", "Saved and the agent was " + (action === "restart" ? "restarted" : "started") + ". Check the log below.");
+  }
+  await refreshState();
+  setTimeout(loadLog, 1500);
+}));
+
+async function loadLog() {
+  const r = await api("/api/log");
+  $("log").textContent = (r.lines && r.lines.length) ? r.lines.join("\n") : (r.note || "Nothing in the log yet.");
+}
+$("refreshLog").addEventListener("click", (e) => busy(e.target, loadLog));
+
+$("finish").addEventListener("click", (e) => busy(e.target, async () => {
+  await api("/api/finish", { method: "POST" });
+  document.body.innerHTML = '<main><h1>Setup closed</h1><p class="sub">You can close this tab. Run the setup command again if you need to change anything.</p></main>';
+}));
+
+load().catch((e) => show($("saveMsg"), "bad", escapeHTML(e.message)));
+</script>
+</body>
+</html>
