@@ -710,17 +710,42 @@ func (s *resultsSession) game(gameNumber int) ([]byte, error) {
 		s.retire()
 		return nil, err
 	}
-	got, isGame := payloadGameNumber(raw)
-	if !isGame {
-		// Read cleanly and in sequence, so the connection is fine — this is
-		// O-Zone declining the game, not a desync. Keep the connection.
-		return nil, fmt.Errorf("%w (game #%d)", errNotGameData, gameNumber)
-	}
-	if got > 0 && got != gameNumber {
-		s.retire()
-		return nil, fmt.Errorf("%w: asked for #%d, got #%d", errFrameMismatch, gameNumber, got)
+	if err := verifyPayload(raw, gameNumber); err != nil {
+		// A reply for a DIFFERENT game means the stream is off by one, so the
+		// connection cannot be trusted for the next request either. Not being
+		// game data is a different thing entirely: that reply was read cleanly
+		// and in sequence — it is O-Zone declining the game, not a desync — so
+		// the connection stays and the rest of the batch runs over it.
+		if errors.Is(err, errFrameMismatch) {
+			s.retire()
+		}
+		return nil, err
 	}
 	return raw, nil
+}
+
+// verifyPayload reports whether a verbatim results payload may be cached as
+// gameNumber. It is the single rule for that, and it applies to every way a
+// payload can reach the cache — the print server via resultsSession.game, and
+// central's failover store via restoreFromCentral and Collect.
+//
+// Caching a payload under the wrong number is the one cache error that does not
+// heal. HasRaw then reports the game as present, so refreshCache never asks the
+// print server for it again, and the proxy serves the wrong game's scores to
+// TORN under the right game's number for as long as the cache keeps it. The
+// print-server path has checked this since the connection could desynchronise;
+// the failover path could not desynchronise but is fed by agents that once
+// could, so a payload central holds under the wrong number would be restored
+// straight back into a rebuilt venue cache. Neither path is trusted now.
+func verifyPayload(raw []byte, gameNumber int) error {
+	got, isGame := payloadGameNumber(raw)
+	if !isGame {
+		return fmt.Errorf("%w (game #%d)", errNotGameData, gameNumber)
+	}
+	if got > 0 && got != gameNumber {
+		return fmt.Errorf("%w: asked for #%d, got #%d", errFrameMismatch, gameNumber, got)
+	}
+	return nil
 }
 
 // payloadGameNumber reads the game number a results payload reports for itself.
@@ -1094,7 +1119,14 @@ func (a *App) restoreFromCentral(ctx context.Context) {
 			PlayerCount: m.PlayerCount,
 			Valid:       m.Valid,
 		}
+		// The list entry is central's METADATA and is kept either way: it costs
+		// nothing, and leaving HasRaw false is exactly what lets refreshCache
+		// fetch the real payload from the print server later.
 		_ = a.store.UpsertListEntry(sm) // carries end_time/duration
+		if err := verifyPayload(raw, m.GameNumber); err != nil {
+			log.Printf("[agent] cache: restore of game #%d rejected: %v", m.GameNumber, err)
+			continue
+		}
 		if err := a.store.StoreGame(sm, raw); err == nil {
 			restored++
 		}
@@ -1169,6 +1201,11 @@ func (a *App) Collect(from, to time.Time) (map[string]any, error) {
 			Valid:       m.Valid,
 		}
 		_ = a.store.UpsertListEntry(sm)
+		if err := verifyPayload(raw, m.GameNumber); err != nil {
+			log.Printf("[agent] collect: game #%d rejected: %v", m.GameNumber, err)
+			failed++
+			continue
+		}
 		if err := a.store.StoreGame(sm, raw); err != nil {
 			failed++
 			continue
