@@ -125,6 +125,42 @@ func TestOutOfRangeServerModeClosesTheGate(t *testing.T) {
 	}
 }
 
+// toInt is where the truncation risk starts: it hands back values that some
+// callers store narrowed to int32, and a wrapped value can be a plausible small
+// one. Saturating keeps out-of-range input recognisably out of range.
+func TestToIntSaturatesOutsideInt32(t *testing.T) {
+	big := int64(1)<<32 | 1 // wraps to 1 — "idle" — if it is ever truncated
+
+	cases := []struct {
+		name string
+		in   any
+		want int
+	}{
+		{"json number decodes as float64", float64(big), math.MaxInt32},
+		{"an int64 field", big, math.MaxInt32},
+		{"a numeric string", "4294967297", math.MaxInt32},
+		{"negative overflow", float64(-big), math.MinInt32},
+		{"a NaN is no number at all", math.NaN(), 0},
+		{"an ordinary mode is untouched", float64(6), 6},
+		{"an ordinary string is untouched", "18", 18},
+		{"a game number is untouched", float64(120345), 120345},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := toInt(c.in); got != c.want {
+				t.Fatalf("toInt(%v) = %d, want %d", c.in, got, c.want)
+			}
+		})
+	}
+
+	// The point of saturating rather than wrapping: the result is not a mode
+	// the print server may be touched in.
+	if printServerSafe(toInt(float64(big))) {
+		t.Error("a saturated mode must not read as safe")
+	}
+}
+
 // deferrable separates "not now" from "this failed": neither an active game nor
 // a stale link may burn a per-game retry attempt or a batch's failure budget.
 func TestDeferrableCoversBothIdleRefusals(t *testing.T) {

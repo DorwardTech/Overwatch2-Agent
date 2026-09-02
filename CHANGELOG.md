@@ -19,7 +19,10 @@ The Site Agent and central Overwatch are versioned independently.
   the venue network impersonating one, could therefore have opened that door
   during a live game. An out-of-range value is now recorded as a state the
   agent recognises as neither idle nor in-game, so it stays shut: not being
-  able to read the state is not the same as reading that it is idle.
+  able to read the state is not the same as reading that it is idle. The same
+  bound is applied where the numbers are first read, so no field can carry a
+  value too large for where it is stored — the mode is simply the one where the
+  consequence was worst.
 
 ### Changed
 

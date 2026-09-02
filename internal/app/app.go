@@ -1482,22 +1482,58 @@ func (a *App) saveBuffer() {
 }
 
 // toInt coerces O-Zone JSON values (float64, string, int) to an int.
+// toInt reads an O-Zone numeric field. Every value that arrives here is small —
+// a pack id, a game number, a server mode, a count — and some are stored
+// narrowed to int32. A value too large to fit would TRUNCATE on the way in, and
+// truncation lands on plausible small numbers: 2^32+1 becomes 1, which for
+// SERVERMODE means "idle" and opens the print-server gate. So out-of-range
+// input saturates at the int32 limits, which no allowlist contains, instead of
+// wrapping into one. Bounding it here rather than at each use keeps the
+// guarantee with the parser, where every caller inherits it.
 func toInt(v any) int {
 	switch n := v.(type) {
 	case float64:
-		return int(n)
+		return clampFloatToInt32(n)
 	case int:
-		return n
+		return clampToInt32(int64(n))
 	case int64:
-		return int(n)
+		return clampToInt32(n)
 	case json.Number:
 		i, _ := n.Int64()
-		return int(i)
+		return clampToInt32(i)
 	case string:
-		i, _ := strconv.Atoi(strings.TrimSpace(n))
-		return i
+		// ParseInt with an explicit bit size saturates at the int32 bounds on
+		// overflow, where Atoi would hand back a value that cannot be stored.
+		i, _ := strconv.ParseInt(strings.TrimSpace(n), 10, 32)
+		return int(i)
 	default:
 		return 0
+	}
+}
+
+func clampToInt32(v int64) int {
+	switch {
+	case v > math.MaxInt32:
+		return math.MaxInt32
+	case v < math.MinInt32:
+		return math.MinInt32
+	default:
+		return int(v)
+	}
+}
+
+// clampFloatToInt32 bounds before converting: converting an out-of-range float
+// to an integer type is undefined in Go, so the comparison has to come first.
+func clampFloatToInt32(f float64) int {
+	switch {
+	case math.IsNaN(f):
+		return 0
+	case f > math.MaxInt32:
+		return math.MaxInt32
+	case f < math.MinInt32:
+		return math.MinInt32
+	default:
+		return int(f)
 	}
 }
 
