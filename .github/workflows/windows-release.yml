@@ -1,0 +1,103 @@
+# Publishes the Windows build of the site agent. Linux venues run the container
+# image (docker-image.yml); Windows venues run this executable as a Windows
+# service (see WINDOWS.md). On a version tag the archives are attached to the
+# GitHub release for that tag. A manual run only uploads them as workflow
+# artifacts, for trying a build before it is released.
+name: Windows release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build windows/${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          check-latest: true
+
+      # The reported version is the tag's (v1.2.0 -> 1.2.0) on a release and
+      # version.go's on a manual run: never "dev", and never a hand-kept copy
+      # that can drift from the code.
+      - name: Resolve version
+        id: v
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            v="${GITHUB_REF#refs/tags/v}"
+          else
+            v=$(sed -n 's/^var Value = "\(.*\)"$/\1/p' internal/version/version.go)
+          fi
+          [ -n "$v" ] || { echo "could not determine the version"; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        env:
+          GOOS: windows
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: '0'
+        run: |
+          go build -trimpath \
+            -ldflags="-s -w -X overwatch/agent/internal/version.Value=${{ steps.v.outputs.version }}" \
+            -o dist/overwatch-agent.exe ./cmd/agent
+
+      - name: Package
+        id: pkg
+        run: |
+          name="overwatch-agent_${{ steps.v.outputs.version }}_windows_${{ matrix.arch }}"
+          mkdir -p "out/$name"
+          cp dist/overwatch-agent.exe cmd/agent/agent.env.example WINDOWS.md CHANGELOG.md LICENSE "out/$name/"
+          (cd out && zip -r "$name.zip" "$name")
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pkg.outputs.name }}
+          path: out/*.zip
+          if-no-files-found: error
+
+  release:
+    name: Attach to release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+
+      - name: Checksums
+        run: |
+          cd out
+          sha256sum *.zip > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      # The release notes are this version's section of the changelog.
+      - name: Release notes
+        run: |
+          v="${GITHUB_REF#refs/tags/v}"
+          awk -v v="$v" '/^## \[/ { p = index($0, "[" v "]") > 0 } p' CHANGELOG.md > notes.md
+          [ -s notes.md ] || echo "Site Agent $v" > notes.md
+
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          gh release view "$tag" >/dev/null 2>&1 \
+            || gh release create "$tag" --title "Site Agent ${tag#v}" --notes-file notes.md
+          gh release upload "$tag" out/*.zip out/SHA256SUMS.txt --clobber

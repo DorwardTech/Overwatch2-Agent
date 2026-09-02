@@ -42,6 +42,13 @@ const (
 // the next safe window without burning a retry attempt.
 var errGameActive = errors.New("game in progress: print server off-limits")
 
+// errLinkStale is returned when a print-server operation is refused because the
+// agent has no CURRENT reading of O-Zone's server state. Like errGameActive it
+// defers rather than fails — the work is retried once the link is back — but it
+// is a distinct error so an operator is never told "game in progress" when the
+// truth is that the agent lost contact with O-Zone.
+var errLinkStale = errors.New("O-Zone link stale: server state unknown")
+
 // errFrameMismatch is returned when a results reply identifies itself as a
 // different game than the one requested — the signature of a desynchronised
 // connection. Caching or pushing such a reply would file one game's data under
@@ -54,6 +61,20 @@ var errFrameMismatch = errors.New("results: reply is for a different game")
 // the game cached, serve the error blob to TORN in its place, and stop the
 // agent ever fetching the real thing.
 var errNotGameData = errors.New("results: reply is not game data")
+
+// maxServerModeAge bounds how old a SERVERMODE reading may be and still be
+// trusted to gate print-server access. collect() is the sole writer, so the
+// reading only refreshes while the O-Zone WebSocket poll loop is running; when
+// that link drops, Run reconnects with a backoff capped at 30s and keeps trying
+// for as long as the outage lasts. Without an age bound the last reading stands
+// forever, and paths that do not depend on the poll loop — an operator pressing
+// Resync, a Message Bus finish handler — would keep passing a gate that is
+// really just an old memory of an idle server.
+//
+// Two minutes is comfortably above the worst honest gap between readings (a
+// slow poll can spend ~10s on each of five WebSocket commands plus a ~15s push
+// before the next idle tick) and far below any real outage.
+const maxServerModeAge = 2 * time.Minute
 
 // maxBatchFetchErrors bounds how many CONNECTION failures in a row a batch
 // (backfill/resync or a cache refresh) will absorb before giving up: read
@@ -104,6 +125,7 @@ type App struct {
 	lastGameNum  int
 	lastBusGame  int          // game number from the most recent GAME_START bus event
 	serverMode   atomic.Int32 // latest O-Zone SERVERMODE
+	serverModeAt atomic.Int64 // unix nanos when serverMode was last read (0 = never)
 	gameState    atomic.Int32 // idle/active/finishing (Message Bus driven)
 	fetchedGames map[int]bool
 	pendingFetch map[int]*pendingGame // finished games awaiting a safe (non-game) window
@@ -369,7 +391,7 @@ func (a *App) collect(client *ozone.Client, slow bool) ([]byte, string, error) {
 		return nil, "", err
 	}
 	mode := toInt(server["SERVERMODE"])
-	a.serverMode.Store(int32(mode))
+	a.noteServerMode(mode)
 	a.reconcileState(mode)
 	if a.cfg.ResultsEnabled {
 		a.checkGameResults(server)
@@ -521,8 +543,8 @@ func (a *App) drainPendingFetches() {
 // results API — retrying on a later poll. Genuine fetch failures back off
 // per-game and give up after maxFetchAttempts.
 func (a *App) fetchGameResults(gameNumber int) {
-	if !a.safeForPrintServer(int(a.serverMode.Load())) {
-		return // a game is active; never touch the print server now
+	if a.printServerGate() != nil {
+		return // a game is active, or the link is stale; never touch it now
 	}
 	if !a.resultsMu.TryLock() {
 		return // a command is using the results API; retry next poll
@@ -530,8 +552,8 @@ func (a *App) fetchGameResults(gameNumber int) {
 	defer a.resultsMu.Unlock()
 
 	if err := a.pullGameResults(gameNumber); err != nil {
-		if errors.Is(err, errGameActive) {
-			return // a game started under us; retry in the next safe window
+		if deferrable(err) {
+			return // not now; retry in the next safe window, no attempt burnt
 		}
 		a.noteFetchFailure(gameNumber, err)
 		return
@@ -613,8 +635,8 @@ func (s *resultsSession) connect() (*results.Client, error) {
 	if s.conn != nil {
 		return s.conn, nil
 	}
-	if !s.app.safeForPrintServer(int(s.app.serverMode.Load())) {
-		return nil, errGameActive
+	if err := s.app.printServerGate(); err != nil {
+		return nil, err
 	}
 	rc, err := results.Dial(s.app.cfg.OzoneHost, s.app.cfg.OzoneResultsPort, 5*time.Second)
 	if err != nil {
@@ -744,10 +766,12 @@ func (a *App) processCommands() {
 	for _, c := range cmds {
 		// Commands that hit the O-Zone print server must never run during active
 		// play. Defer them (central re-queues) until the server is idle.
-		if isResultsCommand(c.Type) && !a.safeForPrintServer(int(a.serverMode.Load())) {
-			_ = a.pusher.AckCommand(c.ID, "deferred", map[string]any{"reason": "game in progress"})
-			log.Printf("[agent] commands: deferred %s #%d — game in progress", c.Type, c.ID)
-			continue
+		if isResultsCommand(c.Type) {
+			if gate := a.printServerGate(); gate != nil {
+				_ = a.pusher.AckCommand(c.ID, "deferred", map[string]any{"reason": gate.Error()})
+				log.Printf("[agent] commands: deferred %s #%d — %v", c.Type, c.ID, gate)
+				continue
+			}
 		}
 
 		status, result := a.runCommand(c)
@@ -800,11 +824,50 @@ func printServerSafe(mode int) bool {
 	return false
 }
 
-// safeForPrintServer combines the two idle signals: the Message Bus driven game
-// state (primary) AND the WS SERVERMODE allowlist (backstop). Both must say idle
-// before the agent touches the O-Zone print server — never during a live game.
+// safeForPrintServer combines the two idle signals — the Message Bus driven game
+// state (primary) AND the WS SERVERMODE allowlist (backstop) — with the age of
+// the SERVERMODE reading itself. Both signals must say idle, and the reading
+// they rest on must be current, before the agent touches the O-Zone print
+// server. The age matters because collect() is the sole writer of both: once
+// the WS link drops they stop moving, so a favourable pair is only as good as
+// the moment it was read (see maxServerModeAge).
 func (a *App) safeForPrintServer(mode int) bool {
-	return printServerSafe(mode) && a.gameState.Load() == stateIdle
+	return printServerSafe(mode) && a.gameState.Load() == stateIdle && a.serverModeFresh()
+}
+
+// noteServerMode records a freshly read SERVERMODE. It is the ONLY writer of
+// serverMode, so the value and the time it was read can never drift apart — the
+// gate trusts the value only because this pairs it with its age.
+func (a *App) noteServerMode(mode int) {
+	a.serverMode.Store(int32(mode))
+	a.serverModeAt.Store(time.Now().UnixNano())
+}
+
+// serverModeFresh reports whether the last SERVERMODE reading is recent enough
+// to gate print-server access. A never-polled agent is never fresh: not knowing
+// the server state is not the same as knowing it is idle.
+func (a *App) serverModeFresh() bool {
+	at := a.serverModeAt.Load()
+	return at != 0 && time.Since(time.Unix(0, at)) <= maxServerModeAge
+}
+
+// printServerGate is safeForPrintServer with the reason attached, for the paths
+// that report why they deferred. nil means the print server may be touched.
+func (a *App) printServerGate() error {
+	if !a.serverModeFresh() {
+		return errLinkStale
+	}
+	if !a.safeForPrintServer(int(a.serverMode.Load())) {
+		return errGameActive
+	}
+	return nil
+}
+
+// deferrable reports whether an error means "not now" rather than "this
+// failed": the work is retried in the next safe window without burning an
+// attempt or counting against a batch's failure budget.
+func deferrable(err error) bool {
+	return errors.Is(err, errGameActive) || errors.Is(err, errLinkStale)
 }
 
 // reconcileState lets WS SERVERMODE correct the bus-driven game state if the bus
@@ -860,7 +923,13 @@ func (a *App) refreshCache() {
 	if a.store == nil {
 		return
 	}
-	if !a.safeForPrintServer(int(a.serverMode.Load())) {
+	if err := a.printServerGate(); err != nil {
+		if errors.Is(err, errLinkStale) {
+			// The poll loop refreshes the reading, so it is never stale on the
+			// polled path — this is a Resync or a bus finish arriving while the
+			// O-Zone link is down. Say so, or the refresh looks like a no-op.
+			log.Printf("[agent] cache: refresh deferred — %v", err)
+		}
 		return
 	}
 	if !a.resultsMu.TryLock() {
@@ -896,8 +965,8 @@ func (a *App) refreshCache() {
 		}
 		raw, err := sess.game(num)
 		if err != nil {
-			if errors.Is(err, errGameActive) {
-				return // a game started as we went to reconnect
+			if deferrable(err) {
+				return // a game started, or the link went stale, before reconnect
 			}
 			log.Printf("[agent] cache: refresh of game #%d failed: %v", num, err)
 			if errors.Is(err, errNotGameData) {
@@ -1155,10 +1224,11 @@ func (a *App) runCommand(c push.Command) (string, map[string]any) {
 		a.resultsMu.Lock()
 		err := a.pullGameResults(n)
 		a.resultsMu.Unlock()
-		if errors.Is(err, errGameActive) {
-			// A game started between the command-queue gate and now; central
-			// re-queues deferred commands for the next safe window.
-			return "deferred", map[string]any{"reason": "game in progress", "game_number": n}
+		if deferrable(err) {
+			// A game started between the command-queue gate and now, or the
+			// O-Zone link went stale; central re-queues deferred commands for
+			// the next safe window.
+			return "deferred", map[string]any{"reason": err.Error(), "game_number": n}
 		}
 		if err != nil {
 			return "failed", map[string]any{"error": err.Error(), "game_number": n}
@@ -1227,8 +1297,8 @@ func (a *App) syncGames(payload map[string]any, force bool) (string, map[string]
 	// a game may have started while we blocked here. Re-check before dialling:
 	// every print-server connection is made under a freshly read idle signal,
 	// exactly as pullGameResults does for the per-game path.
-	if !a.safeForPrintServer(int(a.serverMode.Load())) {
-		return "deferred", map[string]any{"reason": "game in progress"}
+	if err := a.printServerGate(); err != nil {
+		return "deferred", map[string]any{"reason": err.Error()}
 	}
 
 	sess := a.newResultsSession()
@@ -1261,20 +1331,22 @@ func (a *App) syncGames(payload map[string]any, force bool) (string, map[string]
 			continue
 		}
 		// Stop immediately if a game starts mid-batch — a long backfill must
-		// never keep pulling from the print server during active play. Central
-		// re-queues the deferred command for the next safe window.
-		if !a.safeForPrintServer(int(a.serverMode.Load())) {
-			log.Printf("[agent] sync aborted: game started mid-batch (%d synced so far)", synced)
+		// never keep pulling from the print server during active play. The same
+		// applies if the O-Zone link goes stale under us: the gate is then an
+		// old reading, not a live all-clear. Central re-queues the deferred
+		// command for the next safe window.
+		if err := a.printServerGate(); err != nil {
+			log.Printf("[agent] sync aborted mid-batch: %v (%d synced so far)", err, synced)
 			return "deferred", map[string]any{
-				"reason": "game started mid-batch", "synced": synced, "skipped": skipped, "failed": failed,
+				"reason": err.Error(), "synced": synced, "skipped": skipped, "failed": failed,
 			}
 		}
 		raw, err := sess.game(num)
 		if err != nil {
-			if errors.Is(err, errGameActive) {
-				log.Printf("[agent] sync aborted: game started before reconnect (%d synced so far)", synced)
+			if deferrable(err) {
+				log.Printf("[agent] sync aborted before reconnect: %v (%d synced so far)", err, synced)
 				return "deferred", map[string]any{
-					"reason": "game started mid-batch", "synced": synced, "skipped": skipped, "failed": failed,
+					"reason": err.Error(), "synced": synced, "skipped": skipped, "failed": failed,
 				}
 			}
 			log.Printf("[agent] sync: game #%d failed: %v", num, err)

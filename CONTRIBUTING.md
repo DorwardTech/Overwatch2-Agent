@@ -11,12 +11,13 @@ By participating, you agree to abide by our [Code of Conduct](CODE_OF_CONDUCT.md
 - **Security issues:** do **not** open a public issue — follow
   [SECURITY.md](SECURITY.md) (private reporting via the Security tab).
 - **Bugs / features:** open an issue using the templates. Include the agent
-  version / image tag, which optional features were enabled (proxy, cache,
-  message bus, admin API), and relevant logs **with any tokens/secrets redacted**.
+  version / image tag, how it is deployed (Docker image or Windows service),
+  which optional features were enabled (proxy, cache, message bus, admin API),
+  and relevant logs **with any tokens/secrets redacted**.
 
 ## Development setup
 
-You need **Go 1.24+**.
+You need **Go 1.25+**.
 
 ```bash
 git clone https://github.com/DorwardTech/Overwatch2-Agent.git
@@ -30,7 +31,11 @@ Run the checks CI enforces before opening a PR:
 gofmt -l .      # must print nothing (use `gofmt -w .` to fix)
 go vet ./...
 go test ./...
+GOOS=windows GOARCH=amd64 go vet ./... && GOOS=windows GOARCH=amd64 go build ./...   # the Windows service build
 ```
+
+The Windows service code lives behind a `windows` build tag, so a Linux build
+alone never compiles it — the cross-compile line above is what CI runs.
 
 ## Making changes
 
@@ -49,7 +54,7 @@ go test ./...
 1. Fork the repo and create a branch from `main`.
 2. Make your change; ensure `gofmt`, `go vet`, and `go test ./...` all pass.
 3. Open a PR and fill in the template. Link any related issue.
-4. CI builds the agent image — keep it green.
+4. CI builds the agent image and cross-compiles the Windows executable — keep it green.
 
 For substantial or cross-cutting changes, please open an issue first to discuss
 the approach with the maintainers.

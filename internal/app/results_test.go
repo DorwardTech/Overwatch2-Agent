@@ -28,9 +28,35 @@ func newSimApp(t *testing.T) (*App, *ozonesim.PrintServer) {
 		CentralURL:       "http://central.invalid",
 		Token:            "test",
 	})
-	a.serverMode.Store(1) // idle
+	a.noteServerMode(1) // idle
 	a.gameState.Store(stateIdle)
 	return a, ps
+}
+
+// A backfill or resync passes through the command-queue gate before it blocks
+// on the results lock, and both readings that gate consults are written only by
+// the poll loop. If the O-Zone link has dropped, "idle" is simply the last
+// thing the agent saw — so the batch must defer, and say why, rather than dial
+// the print server on a memory.
+func TestSyncGamesDefersOnAStaleLink(t *testing.T) {
+	a, ps := newSimApp(t)
+	ps.SetList([]byte(`{"gamelist":[{"gamenum":9,"gamename":"g9","duration":601,` +
+		`"starttime":"s","endtime":"e","playercount":2,"valid":1}]}`))
+
+	// Last seen idle — but long enough ago that it means nothing now.
+	a.serverModeAt.Store(time.Now().Add(-maxServerModeAge - time.Second).UnixNano())
+
+	status, result := a.syncGames(map[string]any{}, true)
+
+	if status != "deferred" {
+		t.Fatalf("status = %q, want deferred on a stale O-Zone link", status)
+	}
+	if got, _ := result["reason"].(string); got != errLinkStale.Error() {
+		t.Errorf("reason = %q, want %q — an outage must not be reported as a game", got, errLinkStale)
+	}
+	if ps.Connections() != 0 {
+		t.Fatalf("print server was contacted on a stale reading (connections=%d)", ps.Connections())
+	}
 }
 
 // A backfill/resync must stop the moment a game starts mid-batch — the print
@@ -76,7 +102,7 @@ func TestRefetchGameDefersWhenGameActive(t *testing.T) {
 	if status != "deferred" {
 		t.Fatalf("status = %q, want deferred", status)
 	}
-	if result["reason"] != "game in progress" {
+	if result["reason"] != errGameActive.Error() {
 		t.Fatalf("result = %v, want a game-in-progress reason", result)
 	}
 	if ps.Connections() != 0 {
@@ -88,7 +114,7 @@ func TestRefetchGameDefersWhenGameActive(t *testing.T) {
 // active, whatever the caller previously checked.
 func TestPullGameResultsRefusesDuringGame(t *testing.T) {
 	a, ps := newSimApp(t)
-	a.serverMode.Store(6) // game in progress
+	a.noteServerMode(6) // game in progress
 
 	if err := a.pullGameResults(9); err != errGameActive {
 		t.Fatalf("err = %v, want errGameActive", err)
@@ -223,7 +249,7 @@ func TestSyncGamesDefersWhenGameStartsDuringLockWait(t *testing.T) {
 	if status != "deferred" {
 		t.Fatalf("status = %q, want deferred (a game started during the lock wait)", status)
 	}
-	if result["reason"] != "game in progress" {
+	if result["reason"] != errGameActive.Error() {
 		t.Fatalf("result = %v, want a game-in-progress reason", result)
 	}
 	if ps.Connections() != 0 {
@@ -273,7 +299,7 @@ func TestCheckGameResultsDrainsOffThePollGoroutine(t *testing.T) {
 	// is in flight. With a synchronous drain this update could not land until
 	// every queued game had already been pulled.
 	<-fetching
-	a.serverMode.Store(6) // what collect() would store on the next poll
+	a.noteServerMode(6) // what collect() would store on the next poll
 
 	time.Sleep(time.Second)
 	if got := ps.Requests("all"); got != 1 {

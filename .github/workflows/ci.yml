@@ -27,6 +27,17 @@ jobs:
           go test -race ./...
           go build ./...
 
+      # The Windows service code sits behind a build tag, so a Linux build never
+      # compiles it: vet and build for Windows too (what windows-release.yml
+      # ships), or it rots unseen.
+      - name: Cross-compile for Windows
+        env:
+          CGO_ENABLED: '0'
+        run: |
+          GOOS=windows GOARCH=amd64 go vet ./...
+          GOOS=windows GOARCH=amd64 go build ./...
+          GOOS=windows GOARCH=arm64 go build ./...
+
       # The legacy Nexus integration tests (build tag `integration`) run the real
       # SQL against a database seeded from production dumps, which are not part of
       # this public mirror. They self-skip without NEXUS_TEST_DSN; here we only
