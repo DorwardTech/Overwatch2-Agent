@@ -286,3 +286,26 @@ func (p *Pusher) post(endpoint string, payload []byte, idempotencyKey string) er
 	}
 	return nil
 }
+
+// Probe checks that central is reachable and that this token is accepted,
+// without sending anything. It asks for the site's pending command queue: a
+// read-only endpoint behind the same token check as ingestion, so a success
+// proves the whole path — URL, network, TLS and token — while writing no
+// telemetry. Testing with a real push would file a fabricated batch against
+// the venue every time somebody pressed the button.
+//
+// A non-2xx response is returned as *HTTPError so the caller can tell a
+// rejected token (401/403) from a mistyped URL (404) from central being unwell.
+func (p *Pusher) Probe() error {
+	resp, err := p.get(p.commandsURL)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return &HTTPError{StatusCode: resp.StatusCode}
+	}
+	return nil
+}

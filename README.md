@@ -40,10 +40,14 @@ no Docker. Download the `windows_amd64` archive from the
 to `C:\Program Files\Overwatch Agent\`, then from an elevated PowerShell:
 
 ```powershell
-.\overwatch-agent.exe install                          # registers the service, writes agent.env
-notepad "C:\ProgramData\Overwatch Agent\agent.env"     # set the URL, token and game-server host
-.\overwatch-agent.exe start
+.\overwatch-agent.exe install     # registers the service and adds a Start Menu entry
 ```
+
+Then open **Overwatch Agent Setup** from the Start Menu: a browser page with a
+form for the venue's settings, a **Test this connection** button for Overwatch
+and for the game server, and a **Save and start** button. No file editing, and
+no reading a log to find out whether the token was right. (`overwatch-agent
+setup` opens the same page from an elevated prompt.)
 
 [WINDOWS.md](WINDOWS.md) is the full guide: where files live, the firewall,
 running on the game server PC itself, upgrading and troubleshooting.
@@ -125,6 +129,7 @@ internal/
   config/   env parsing + validation, KEY=VALUE config file
   platform/ per-OS data directory + path defaults
   logfile/  size-rotated log file
+  setupui/  loopback-only configuration page (`agent setup`)
   ozone/    WebSocket client (GETSERVERSTATE, GETACTIVEPACKS, GETTEAMINFO, …)
   buffer/   bounded FIFO for offline batches
   push/     HTTPS client (token auth, retries)

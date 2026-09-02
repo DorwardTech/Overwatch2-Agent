@@ -6,6 +6,43 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 The Site Agent and central Overwatch are versioned independently.
 
+## [1.3.0] — 2026-09-02
+
+### Added
+
+- **A setup page, so nobody has to edit a configuration file.** Installing the
+  agent at a venue ended in the one step most likely to go wrong: open a text
+  file as an administrator, type an address, a token and a host into it without
+  breaking the syntax, and then read a log to find out whether any of it was
+  right. The person doing that is whoever is on shift.
+
+  `overwatch-agent setup` — and, on Windows, an **Overwatch Agent Setup** entry
+  the installer adds to the Start Menu — opens a page in the browser with a form
+  instead. It has a button that tests the connection to Overwatch and says which
+  of the three possible problems it found: the address is wrong, the token was
+  rejected, or the server could not be reached at all. It has another that
+  connects to the venue's game server and reports what it answered. It saves the
+  settings, installs or restarts the agent, and shows the log so the operator
+  can watch it come up. Nothing about it needs a command prompt.
+
+  Testing Overwatch reads the site's pending command queue rather than sending a
+  push: it proves the address, the network and the token together, while filing
+  no invented game data against the venue. Testing the game server uses the
+  read-only telemetry connection the agent already polls; the print server is
+  never touched, so the test is safe to press during a game.
+
+  Saving keeps the file the operator was given. Their comments stay, settings
+  the form does not show — a legacy database connection, say — stay, and a
+  setting switched off is commented out with its value intact rather than
+  deleted, so switching it back on restores it.
+
+  The page is only reachable from the machine it runs on: it listens on the
+  loopback address, admits only the browser it was opened in, refuses requests
+  addressed to anything but this computer's own address, and closes when the
+  operator presses Finish or leaves it half an hour. It writes the site token,
+  so the data directory is secured before it starts, whether or not the service
+  has been installed yet.
+
 ## [1.2.1] — 2026-09-02
 
 ### Security
@@ -40,6 +77,7 @@ The Site Agent and central Overwatch are versioned independently.
   copies at once inside an agent limited to 128 MB, competing with the buffer
   that exists to survive an outage. Backups now read the data when their turn
   comes, four at a time.
+
 
 ## [1.2.0] — 2026-09-02
 

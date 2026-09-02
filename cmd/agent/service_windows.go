@@ -19,6 +19,7 @@ import (
 	"golang.org/x/sys/windows/svc/mgr"
 
 	"overwatch/agent/internal/platform"
+	"overwatch/agent/internal/setupui"
 	"overwatch/agent/internal/version"
 )
 
@@ -264,11 +265,22 @@ func installService(opts options) error {
 		fmt.Printf("  Config:   %s\n", configPath)
 	}
 	fmt.Printf("  Log:      %s\n", filepath.Join(dataDir, "logs", "agent.log"))
+	if err := createSetupShortcut(exe); err != nil {
+		fmt.Printf("  Setup:    overwatch-agent setup   (no Start Menu entry: %v)\n", err)
+	} else {
+		fmt.Printf("  Setup:    Start Menu -> \"Overwatch Agent Setup\"\n")
+	}
 	for _, w := range installWarnings(exe, configPath, dataDir, wroteTemplate) {
 		fmt.Printf("\nWarning: %s\n", w)
 	}
 	fmt.Println()
-	fmt.Println("Next: edit the config as administrator, then run:  overwatch-agent start")
+	if wroteTemplate {
+		fmt.Println("Next: open \"Overwatch Agent Setup\" from the Start Menu (or run `overwatch-agent")
+		fmt.Println("setup`) to fill in the venue's settings and start the agent.")
+	} else {
+		fmt.Println("Next: run `overwatch-agent start`, or open \"Overwatch Agent Setup\" from the")
+		fmt.Println("Start Menu to check the settings first.")
+	}
 	return nil
 }
 
@@ -465,6 +477,7 @@ func uninstallService() error {
 	if err := eventlog.Remove(serviceName); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: event log source not removed: %v\n", err)
 	}
+	removeSetupShortcut()
 	fmt.Printf("Removed service %s. The configuration, cache and log files were left in place.\n", serviceName)
 	return nil
 }
@@ -579,9 +592,13 @@ func openServiceReadOnly() (*mgr.Mgr, *mgr.Service, error) {
 	return m, &mgr.Service{Name: serviceName, Handle: sh}, nil
 }
 
+// errNotInstalled is a sentinel so callers — the setup page among them — can
+// tell "no such service" from a failure to look.
+var errNotInstalled = fmt.Errorf("service %s is not installed — run `overwatch-agent install` from an elevated prompt", serviceName)
+
 func notInstalledOr(err error) error {
 	if errors.Is(err, windows.ERROR_SERVICE_DOES_NOT_EXIST) {
-		return fmt.Errorf("service %s is not installed — run `overwatch-agent install` from an elevated prompt", serviceName)
+		return errNotInstalled
 	}
 	return fmt.Errorf("open service: %w", err)
 }
@@ -672,3 +689,144 @@ func reportEvent(fn func(*eventlog.Log) error) {
 	defer l.Close()
 	_ = fn(l)
 }
+
+// serviceControl lets the setup page install, start, stop and restart the
+// service — the same calls the command line makes.
+func serviceControl(opts options) setupui.Service { return windowsService{opts: opts} }
+
+type windowsService struct{ opts options }
+
+func (windowsService) Supported() bool { return true }
+
+func (windowsService) Installed() (bool, error) {
+	m, s, err := openServiceReadOnly()
+	if errors.Is(err, errNotInstalled) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	m.Disconnect()
+	s.Close()
+	return true, nil
+}
+
+func (windowsService) State() (string, error) {
+	m, s, err := openServiceReadOnly()
+	if err != nil {
+		return "", err
+	}
+	defer m.Disconnect()
+	defer s.Close()
+	st, err := s.Query()
+	if err != nil {
+		return "", err
+	}
+	return stateName(st.State), nil
+}
+
+func (w windowsService) Install() error { return installService(w.opts) }
+func (windowsService) Start() error     { return startService() }
+func (windowsService) Stop() error      { return stopService() }
+
+func (windowsService) Restart() error {
+	if err := stopService(); err != nil {
+		return err
+	}
+	return startService()
+}
+
+// prepareStorage makes the data directory ready to hold the site token before
+// the setup page writes one into it. Installing normally does this, but the
+// page can be opened first — and a token written into a directory that anyone
+// on the machine can read is exactly what the installer's permissions exist to
+// prevent. Securing it here means it is safe whichever order they are run in:
+// a later install re-applies the same permissions, then naming the service's
+// own identity once that exists.
+func prepareStorage(dataDir string) error {
+	if dataDir == "" {
+		return nil
+	}
+	if !isElevated() {
+		return fmt.Errorf("setup needs administrator rights to write %s and to control the service — right-click your terminal and choose Run as administrator", dataDir)
+	}
+	if err := checkDataDir(dataDir); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Join(dataDir, "logs"), 0o700); err != nil {
+		return fmt.Errorf("create data directory: %w", err)
+	}
+	if err := icacls(dataDir, "/setowner", sidAdministrators, "/T", "/C"); err != nil {
+		return fmt.Errorf("take ownership of %s: %w", dataDir, err)
+	}
+	if _, err := secureDataDir(dataDir); err != nil {
+		return err
+	}
+	return nil
+}
+
+func isElevated() bool { return windows.GetCurrentProcessToken().IsElevated() }
+
+// shortcutName is the Start Menu entry that opens the configuration page. The
+// operator this agent is installed by is whoever is on shift at a laser-tag
+// venue; "find the Start Menu entry" is a reasonable thing to ask of them and
+// "open an administrator command prompt" is not.
+const shortcutName = "Overwatch Agent Setup.lnk"
+
+func startMenuShortcutPath() string {
+	pd := os.Getenv("ProgramData")
+	if pd == "" {
+		return ""
+	}
+	return filepath.Join(pd, "Microsoft", "Windows", "Start Menu", "Programs", shortcutName)
+}
+
+// createSetupShortcut adds the Start Menu entry, marked to run as
+// administrator — the page writes the site token and controls the service, so
+// it needs the elevation prompt that flag produces.
+//
+// Windows has no way to write a shortcut without COM, so this goes through
+// PowerShell's scripting host. It is best-effort: a venue without PowerShell,
+// or a locked-down machine, still has `overwatch-agent setup`.
+func createSetupShortcut(exe string) error {
+	path := startMenuShortcutPath()
+	if path == "" {
+		return errors.New("no ProgramData directory")
+	}
+	script := fmt.Sprintf(`$ErrorActionPreference='Stop'
+$link = %s
+$shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut($link)
+$shortcut.TargetPath = %s
+$shortcut.Arguments = 'setup'
+$shortcut.WorkingDirectory = %s
+$shortcut.Description = 'Set up the Overwatch Site Agent'
+$shortcut.Save()
+# Mark it "run as administrator": bit 0x20 of the link flags.
+$bytes = [System.IO.File]::ReadAllBytes($link)
+$bytes[0x15] = $bytes[0x15] -bor 0x20
+[System.IO.File]::WriteAllBytes($link, $bytes)`,
+		psQuote(path), psQuote(exe), psQuote(filepath.Dir(exe)))
+
+	out, err := exec.Command(powershell(), "-NoProfile", "-NonInteractive", "-Command", script).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%w\n%s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+func removeSetupShortcut() {
+	if path := startMenuShortcutPath(); path != "" {
+		_ = os.Remove(path)
+	}
+}
+
+func powershell() string {
+	if root := os.Getenv("SystemRoot"); root != "" {
+		return filepath.Join(root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+	}
+	return "powershell.exe"
+}
+
+// psQuote renders a string as a PowerShell single-quoted literal, in which the
+// only special character is the quote itself.
+func psQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }

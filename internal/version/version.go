@@ -6,4 +6,4 @@ package version
 //	-ldflags "-X overwatch/agent/internal/version.Value=v1.2.3"
 //
 // or at runtime with the AGENT_VERSION environment variable.
-var Value = "1.2.1"
+var Value = "1.3.0"

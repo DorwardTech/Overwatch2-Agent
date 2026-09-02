@@ -47,44 +47,56 @@ PC itself is the usual choice; the one thing to know about that is under
    Agent*) to start automatically as `NT AUTHORITY\LocalService`, sets it to
    restart on failure, creates the data directory `C:\ProgramData\Overwatch
    Agent\`, takes ownership of it and locks it down to administrators, the
-   system and this service alone, and writes a configuration template to
-   `C:\ProgramData\Overwatch Agent\agent.env`. The data directory is recorded on
-   the service's own command line, so the service always uses the one you
-   installed with. `install` prints what it did — read it before moving on.
+   system and this service alone, writes a starter configuration to
+   `C:\ProgramData\Overwatch Agent\agent.env`, and adds an **Overwatch Agent
+   Setup** entry to the Start Menu. The data directory is recorded on the
+   service's own command line, so the service always uses the one you installed
+   with. `install` prints what it did — read it before moving on.
 
-4. **Fill in the configuration.** Open the file as administrator — from the
-   same elevated prompt:
+4. **Set it up.** Open **Overwatch Agent Setup** from the Start Menu (say yes to
+   the administrator prompt). A page opens in your browser with a form:
 
-   ```powershell
-   notepad "C:\ProgramData\Overwatch Agent\agent.env"
-   ```
+   - **Overwatch address** and **site token** — from Overwatch: *Sites* → edit
+     this venue → generate a token. Press **Test this connection**: it tells you
+     straight away whether the address is right and the token was accepted.
+   - **Game server address** — `127.0.0.1` if the agent is on the game server
+     itself, otherwise its address on the venue network. **Test this
+     connection** too.
+   - **What the agent should do** — leave these alone unless you have been told
+     otherwise.
 
-   Open it from the elevated prompt as above. Do **not** browse to it in
-   Explorer and click *Continue* on the permission prompt: that grants your
-   account permanent Full Control of the folder holding the site token and the
-   cached game data, quietly undoing what the installer set up.
+   Then press **Save and start the agent**. The page installs or restarts the
+   service and shows the agent's log so you can watch it connect.
 
-   Set at least:
+   If the Start Menu entry is missing, the same page opens with
+   `.\overwatch-agent.exe setup` from an elevated prompt. Nothing about the
+   page is available over the network: it is only reachable from this computer,
+   by the browser it opened, and it closes when you press **Finish**.
 
-   | Setting | Value |
-   |---|---|
-   | `CENTRAL_API_URL` | `https://ow2.lasertag.net.au/api/agent/ingest` |
-   | `AGENT_TOKEN` | the site's token, `OW2_<id>_<secret>` |
-   | `OZONE_WS_HOST` | `127.0.0.1` on the game server PC, otherwise its LAN IP |
+Within a minute of starting, the site shows **online** in Overwatch.
 
-   Every other setting in the README's configuration table can go in the same
-   file. Save it as plain text (Notepad's default UTF-8 is fine).
+### Doing it by hand instead
 
-5. **Start it** and watch it come up:
+Everything the page writes is plain text in `agent.env`, and you can edit it
+directly if you prefer. Open it from an elevated prompt, set at least:
 
-   ```powershell
-   .\overwatch-agent.exe start
-   .\overwatch-agent.exe status
-   Get-Content "C:\ProgramData\Overwatch Agent\logs\agent.log" -Tail 50 -Wait
-   ```
+| Setting | Value |
+|---|---|
+| `CENTRAL_API_URL` | `https://ow2.lasertag.net.au/api/agent/ingest` |
+| `AGENT_TOKEN` | the site's token, `OW2_<id>_<secret>` |
+| `OZONE_WS_HOST` | `127.0.0.1` on the game server PC, otherwise its LAN IP |
 
-   Within a minute the site shows **online** in Overwatch, and the log shows
-   pushes being accepted.
+```powershell
+notepad "C:\ProgramData\Overwatch Agent\agent.env"
+.\overwatch-agent.exe start
+.\overwatch-agent.exe status
+Get-Content "C:\ProgramData\Overwatch Agent\logs\agent.log" -Tail 50 -Wait
+```
+
+Open it from the elevated prompt as above. Do **not** browse to it in Explorer
+and click *Continue* on the permission prompt: that grants your account
+permanent Full Control of the folder holding the site token and the cached game
+data, quietly undoing what the installer set up.
 
 ## Where things live
 
@@ -108,6 +120,10 @@ its own.
 
 ## Configuration
 
+The easiest way to change any of this is **Overwatch Agent Setup** in the Start
+Menu, which edits the same file and leaves your own comments and any settings it
+does not show untouched.
+
 The agent reads `agent.env` at startup: one `KEY=VALUE` per line, `#` starts
 a comment, and a value may be quoted. Nothing else is interpreted, so Windows
 paths are written as they are (`LOG_FILE=D:\logs\agent.log`). Any variable
@@ -123,7 +139,8 @@ table — with these defaults on Windows:
 | `PACK_IR_BUFFER_FILE` | `<data>\packir-buffer.json` | off |
 | `LOG_FILE` | `<data>\logs\agent.log` | off (console only) |
 
-After changing the file, restart the service: `.\overwatch-agent.exe restart`.
+After changing the file by hand, restart the service:
+`.\overwatch-agent.exe restart`. The setup page does that for you.
 
 ## Running on the game server PC
 
@@ -183,6 +200,7 @@ prompt):
 
 | Command | |
 |---|---|
+| `.\overwatch-agent.exe setup` | open the configuration page in a browser |
 | `.\overwatch-agent.exe status` | state, start type, account, command line, version |
 | `.\overwatch-agent.exe start` | start, and wait until it reports running |
 | `.\overwatch-agent.exe stop` | stop, and wait until it has drained |
@@ -214,8 +232,8 @@ agent version updates on the Sites screen.
 .\overwatch-agent.exe uninstall
 ```
 
-This stops and removes the service and its event log source. The data
-directory is **left in place** because it holds the site token and cached game
+This stops and removes the service, its event log source and the Start Menu
+entry. The data directory is **left in place** because it holds the site token and cached game
 data; delete `C:\ProgramData\Overwatch Agent\` yourself once you are sure.
 
 ## Security notes
@@ -256,13 +274,18 @@ data; delete `C:\ProgramData\Overwatch Agent\` yourself once you are sure.
 It logs to the console *and* the log file; `Ctrl+C` stops it cleanly. Start
 the service again afterwards.
 
+Start with **Overwatch Agent Setup**: its two test buttons say which of the
+address, the token and the game server is wrong, and it shows the log without
+a terminal.
+
 | Symptom | Look at |
 |---|---|
 | `start` says the service stopped straight away | the Application event log and the last lines of `agent.log` — usually a missing `CENTRAL_API_URL` / `AGENT_TOKEN`, or a file the service account cannot read. The event log names the reason: the agent checks its configuration before reporting the service as started |
 | `install` refuses the folder given to `--data-dir` | it is a drive root, a system folder, or already holds files that are not the agent's — installing would rewrite its permissions. Give the agent an empty folder |
 | access-denied error starting the service | the executable is in a user profile: move it under *Program Files* and reinstall |
 | `install` says access denied | the prompt is not elevated |
-| site stays offline | `agent.log`: a wrong token is a `401`, a wrong host a `connect failed` on the game server line |
+| site stays offline | the setup page's **Test this connection** buttons; in `agent.log` a wrong token is a `401` and a wrong host a `connect failed` |
+| the setup page will not open | it needs administrator rights — use the Start Menu entry, or run `overwatch-agent setup` from an elevated prompt |
 | proxy failed to start | port `12123` is the real print server's on this PC — set `PROXY_LISTEN_ADDR` |
 
 ## Building from source
