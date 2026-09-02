@@ -8,7 +8,7 @@ FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS build
 # Default to the current release so an un-tagged build (e.g. main -> :latest)
 # still reports a real version, not "dev". Tagged releases override this via a
 # build-arg (see docker-image.yml). Keep in sync with internal/version.Value.
-ARG AGENT_VERSION=1.3.1
+ARG AGENT_VERSION=1.3.2
 ARG TARGETOS TARGETARCH TARGETVARIANT
 WORKDIR /src
 COPY go.mod go.sum ./

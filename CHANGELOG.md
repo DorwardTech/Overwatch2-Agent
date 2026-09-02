@@ -6,6 +6,32 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 The Site Agent and central Overwatch are versioned independently.
 
+## [1.3.2] — 2026-09-02
+
+### Fixed
+
+- **A game restored from Overwatch is now checked against the game it claims to
+  be.** The agent already refused a payload from the venue's game server that
+  named a different game — the connection those arrive on can lose its place,
+  and one game's scores filed under another game's number is the one cache
+  error that never heals: the agent sees the game as present, so it never
+  fetches the real one, and the scoresheet software is served the wrong game
+  under the right number for as long as the cache keeps it.
+
+  The same payload can also arrive the other way — restored from Overwatch when
+  a venue box is rebuilt, or pulled in by hand with **Collect from Overwatch** —
+  and that route was trusted without the check. Overwatch's copy is filled by
+  agents, including agents old enough to have had the fault, so a game stored
+  there under the wrong number would have been copied straight back into the
+  rebuilt cache and stayed. Both routes now apply the same rule, and it is
+  written down once rather than twice.
+
+  A rejected payload is logged and skipped, not stored. The game's details are
+  kept, so the agent knows the game exists and fetches it properly from the
+  venue's own server at the next refresh. A payload that names no game number at
+  all is still accepted: only one that positively identifies as a different game
+  is refused.
+
 ## [1.3.1] — 2026-09-02
 
 ### Fixed
