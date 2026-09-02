@@ -35,19 +35,20 @@ docker run -d --restart unless-stopped --name overwatch-agent \
 ## Windows (no Docker)
 
 On Windows the agent runs as a native **Windows service** from one executable —
-no Docker. Download the `windows_amd64` archive from the
-[releases](https://github.com/DorwardTech/Overwatch2-Agent/releases), extract it
-to `C:\Program Files\Overwatch Agent\`, then from an elevated PowerShell:
+no Docker. Download `overwatch-agent_<version>_windows_setup.exe` from the
+[releases](https://github.com/DorwardTech/Overwatch2-Agent/releases) and run it.
+One installer covers x64 and Arm64; it puts the agent in *Program Files*,
+registers the service, and offers to open the setup page when it finishes.
 
-```powershell
-.\overwatch-agent.exe install     # registers the service and adds a Start Menu entry
-```
+That page is a browser form for the venue's settings, with a **Test this
+connection** button for Overwatch and for the game server, and a **Save and
+start** button. No file editing, and no reading a log to find out whether the
+token was right. (It is on the Start Menu as **Overwatch Agent Setup**, and
+`overwatch-agent setup` opens the same page from an elevated prompt.)
 
-Then open **Overwatch Agent Setup** from the Start Menu: a browser page with a
-form for the venue's settings, a **Test this connection** button for Overwatch
-and for the game server, and a **Save and start** button. No file editing, and
-no reading a log to find out whether the token was right. (`overwatch-agent
-setup` opens the same page from an elevated prompt.)
+The per-architecture `.zip` archives are still published for scripted rollouts;
+[WINDOWS.md](WINDOWS.md) covers installing from one, and the installer's silent
+switches.
 
 [WINDOWS.md](WINDOWS.md) is the full guide: where files live, the firewall,
 running on the game server PC itself, upgrading and troubleshooting.

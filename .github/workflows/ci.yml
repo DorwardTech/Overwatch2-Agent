@@ -45,6 +45,48 @@ jobs:
       - name: Build integration-tagged tests
         run: go build -tags=integration ./...
 
+  # windows-release.yml only builds the installer on a v* tag, so without this
+  # a broken installer script would not surface until a release was being cut.
+  # It proves the script compiles against the same payload layout the release
+  # job stages; what it produces is thrown away.
+  installer:
+    name: Build Windows installer (check)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          check-latest: true
+
+      - name: Stage a payload
+        shell: pwsh
+        env:
+          CGO_ENABLED: '0'
+          GOOS: windows
+        run: |
+          foreach ($arch in 'amd64', 'arm64') {
+            $env:GOARCH = $arch
+            go build -o "stage/$arch/overwatch-agent.exe" ./cmd/agent
+            if ($LASTEXITCODE -ne 0) { throw "build failed for $arch" }
+          }
+          Copy-Item cmd/agent/agent.env.example, WINDOWS.md, CHANGELOG.md, LICENSE stage/amd64/
+
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress --yes
+
+      - name: Compile the installer
+        shell: pwsh
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" `
+            "/DAppVersion=0.0.0" `
+            "/DAmd64Dir=stage\amd64" `
+            "/DArm64Dir=stage\arm64" `
+            "/DOutDir=out" `
+            "packaging\windows\overwatch-agent.iss"
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with $LASTEXITCODE" }
+
   security:
     name: Vulnerability scan
     runs-on: ubuntu-latest
