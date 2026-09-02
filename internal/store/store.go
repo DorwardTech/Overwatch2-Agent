@@ -20,6 +20,20 @@ import (
 	"time"
 )
 
+// metaTouchInterval bounds how often an UNCHANGED list entry is rewritten just
+// to advance its freshness marker. refreshCache re-lists every game O-Zone
+// holds once a minute, and each pass wrote one file per listed game — thousands
+// of writes a minute against a venue box's flash, for data that had not
+// changed.
+//
+// The marker cannot simply stop advancing. Prune deletes on UpdatedAt, which
+// here means "last seen in O-Zone's list", so freezing it would age out the
+// games the venue is still playing — exactly the ones TORN asks the proxy for
+// when the print server is down. An unchanged entry is therefore still
+// refreshed, just at this interval rather than every pass. Keep it well inside
+// CACHE_RETENTION_HOURS (default 24h).
+const metaTouchInterval = 15 * time.Minute
+
 // GameMeta is the denormalised summary used to rebuild the O-Zone game list and
 // to drive retention. The verbatim payload itself lives alongside as <n>.bin.
 type GameMeta struct {
@@ -41,6 +55,10 @@ type Store struct {
 	mu   sync.RWMutex
 	meta map[int]GameMeta
 	now  func() time.Time
+
+	// How stale an unchanged entry's marker may get before it is rewritten.
+	// A field so tests can shrink it; metaTouchInterval in real use.
+	touchEvery time.Duration
 }
 
 // Open prepares the cache directory and loads the metadata index from disk.
@@ -50,7 +68,7 @@ func Open(dir string) (*Store, error) {
 			return nil, fmt.Errorf("store: mkdir %s: %w", sub, err)
 		}
 	}
-	s := &Store{dir: dir, meta: map[int]GameMeta{}, now: time.Now}
+	s := &Store{dir: dir, meta: map[int]GameMeta{}, now: time.Now, touchEvery: metaTouchInterval}
 	if err := s.loadMeta(); err != nil {
 		return nil, err
 	}
@@ -90,17 +108,40 @@ func (s *Store) UpsertListEntry(e GameMeta) error {
 	defer s.mu.Unlock()
 
 	m := s.meta[e.GameNumber]
-	m.GameNumber = e.GameNumber
+	next := m
+	next.GameNumber = e.GameNumber
 	if e.GameName != "" {
-		m.GameName = e.GameName
+		next.GameName = e.GameName
 	}
-	m.Duration = e.Duration
-	m.StartTime = e.StartTime
-	m.EndTime = e.EndTime
-	m.PlayerCount = e.PlayerCount
-	m.Valid = e.Valid
-	m.UpdatedAt = s.now()
-	return s.saveMetaLocked(m)
+	next.Duration = e.Duration
+	next.StartTime = e.StartTime
+	next.EndTime = e.EndTime
+	next.PlayerCount = e.PlayerCount
+	next.Valid = e.Valid
+
+	// Nothing a reader would notice has changed and the marker is still recent,
+	// so leave the file alone. Memory and disk are written together, so
+	// skipping the write keeps them identical and a restart reads back exactly
+	// what retention was already working from.
+	if sameListFields(m, next) && s.now().Sub(m.UpdatedAt) < s.touchEvery {
+		return nil
+	}
+
+	next.UpdatedAt = s.now()
+	return s.saveMetaLocked(next)
+}
+
+// sameListFields reports whether two entries agree on everything O-Zone's game
+// list supplies. UpdatedAt is deliberately excluded: it is the freshness
+// marker, not content, and comparing it would make every entry differ.
+func sameListFields(a, b GameMeta) bool {
+	return a.GameNumber == b.GameNumber &&
+		a.GameName == b.GameName &&
+		a.Duration == b.Duration &&
+		a.StartTime == b.StartTime &&
+		a.EndTime == b.EndTime &&
+		a.PlayerCount == b.PlayerCount &&
+		a.Valid == b.Valid
 }
 
 // StoreGame writes the verbatim "all" payload and merges the metadata derived

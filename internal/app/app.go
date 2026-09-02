@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -61,6 +62,21 @@ var errFrameMismatch = errors.New("results: reply is for a different game")
 // the game cached, serve the error blob to TORN in its place, and stop the
 // agent ever fetching the real thing.
 var errNotGameData = errors.New("results: reply is not game data")
+
+// unknownServerMode stands for "the server state could not be read as a mode".
+// It is deliberately outside both printServerSafe and gameActive, so it neither
+// opens the print-server gate nor claims a game is running.
+const unknownServerMode = -1
+
+// maxFailoverPushes bounds how many game payloads the failover backup may hold
+// in memory at once. A bulk resync caches hundreds of games back to back, and
+// each backup took its own full copy of the payload the moment it was queued —
+// hundreds of copies live at once, in an agent limited to 128 MB, competing
+// with the very telemetry buffer that exists to survive an outage. Goroutines
+// are cheap; payloads are not, so the payload is now read from the store only
+// once a slot is free. Four at a time keeps the backup useful without letting
+// it become the reason the agent is killed.
+const maxFailoverPushes = 4
 
 // maxServerModeAge bounds how old a SERVERMODE reading may be and still be
 // trusted to gate print-server access. collect() is the sole writer, so the
@@ -135,6 +151,7 @@ type App struct {
 	cmdBusy      atomic.Bool          // single-flight for command processing
 	collectBusy  atomic.Bool          // single-flight for a "collect from central" run
 	fetchBusy    atomic.Bool          // single-flight for a pending-results drain
+	failoverSem  chan struct{}        // bounds concurrent failover payload copies
 	stopRun      context.CancelFunc   // set by Run; requestShutdown cancels it (graceful reboot)
 
 	store  *store.Store   // local verbatim game cache (nil if disabled/unavailable)
@@ -157,6 +174,7 @@ func New(cfg config.Config) *App {
 		fetchedGames: map[int]bool{},
 		pendingFetch: map[int]*pendingGame{},
 		givenUpFetch: map[int]bool{},
+		failoverSem:  make(chan struct{}, maxFailoverPushes),
 	}
 
 	// Restore telemetry spilled by the previous process (outage + restart).
@@ -839,6 +857,16 @@ func (a *App) safeForPrintServer(mode int) bool {
 // serverMode, so the value and the time it was read can never drift apart — the
 // gate trusts the value only because this pairs it with its age.
 func (a *App) noteServerMode(mode int) {
+	// SERVERMODE arrives as untrusted JSON and is stored narrowed to int32.
+	// A value outside that range TRUNCATES, and a truncated value can land
+	// inside printServerSafe's allowlist — 2^32+1 becomes 1, "idle" — so a
+	// nonsense reading could open the print-server gate during a live game.
+	// Out-of-range is therefore recorded as a mode no allowlist contains, which
+	// closes the gate: not being able to read the server state is not the same
+	// as reading that it is idle.
+	if mode < math.MinInt32 || mode > math.MaxInt32 {
+		mode = unknownServerMode
+	}
 	a.serverMode.Store(int32(mode))
 	a.serverModeAt.Store(time.Now().UnixNano())
 }
@@ -1001,14 +1029,31 @@ func (a *App) cacheGame(gameNumber int, raw []byte) {
 		return
 	}
 	if a.cfg.FailoverEnabled {
-		merged, _ := a.store.Meta(meta.GameNumber)
-		go a.failoverPush(merged, append([]byte(nil), raw...))
+		go a.failoverPush(meta.GameNumber)
 	}
 }
 
 // failoverPush backs one game up to central's failover store (best-effort).
-func (a *App) failoverPush(m store.GameMeta, raw []byte) {
-	err := a.pusher.PushOzoneGame(push.OzoneGameMeta{
+// The payload is read from the store rather than carried in, and only after a
+// slot is acquired, so a backlog of pending backups costs goroutines rather
+// than a copy of every game payload it is waiting to send.
+func (a *App) failoverPush(gameNumber int) {
+	a.failoverSem <- struct{}{}
+	defer func() { <-a.failoverSem }()
+
+	if a.store == nil {
+		return
+	}
+	m, ok := a.store.Meta(gameNumber)
+	if !ok {
+		return
+	}
+	raw, ok, err := a.store.GameRaw(gameNumber)
+	if err != nil || !ok {
+		return // pruned or unreadable since it was queued; nothing to back up
+	}
+
+	err = a.pusher.PushOzoneGame(push.OzoneGameMeta{
 		GameNumber:  m.GameNumber,
 		GameName:    m.GameName,
 		GameType:    m.GameType,

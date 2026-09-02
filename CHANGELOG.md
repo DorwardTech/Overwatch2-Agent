@@ -6,6 +6,38 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 The Site Agent and central Overwatch are versioned independently.
 
+## [1.2.1] — 2026-09-02
+
+### Security
+
+- **An unreadable server state could be mistaken for an idle one.** The venue's
+  game server reports its current mode, and the agent stores that number in a
+  narrower form than it arrives in. A value too large to fit was silently cut
+  down to size rather than rejected — and some large values cut down to exactly
+  the number that means "idle", which is what the agent checks before it may
+  read from the game server. A game server sending nonsense, or something on
+  the venue network impersonating one, could therefore have opened that door
+  during a live game. An out-of-range value is now recorded as a state the
+  agent recognises as neither idle nor in-game, so it stays shut: not being
+  able to read the state is not the same as reading that it is idle.
+
+### Changed
+
+- **The cache stopped rewriting thousands of unchanged files a minute.** The
+  agent re-lists every game the venue's game server holds once a minute and
+  rewrote one small file per listed game each time, whether or not anything
+  about it had changed — steady write wear on the venue box's storage for no
+  new information. Unchanged entries are now left alone. They are still
+  refreshed periodically, because that timestamp is also what decides when an
+  old game leaves the cache, and games the venue is still playing must not age
+  out — there is a test for exactly that.
+- **Backing up finished games to Overwatch no longer scales its memory with the
+  backlog.** Each backup took its own full copy of the game's data the moment
+  it was queued, so a bulk re-sync of a rebuilt cache could hold hundreds of
+  copies at once inside an agent limited to 128 MB, competing with the buffer
+  that exists to survive an outage. Backups now read the data when their turn
+  comes, four at a time.
+
 ## [1.2.0] — 2026-09-02
 
 ### Added

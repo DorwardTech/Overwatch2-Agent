@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"testing"
 	"time"
@@ -79,6 +80,48 @@ func TestSafeForPrintServerRequiresACurrentReading(t *testing.T) {
 	a.gameState.Store(stateActive)
 	if !errors.Is(a.printServerGate(), errGameActive) {
 		t.Errorf("gate = %v, want errGameActive during a game", a.printServerGate())
+	}
+}
+
+// SERVERMODE arrives as untrusted JSON and is stored narrowed to int32, so a
+// value outside that range truncates — and 2^32+1 truncates to 1, which is in
+// printServerSafe's allowlist. A nonsense reading could therefore open the
+// print-server gate during a live game.
+func TestOutOfRangeServerModeClosesTheGate(t *testing.T) {
+	if math.MaxInt <= math.MaxInt32 {
+		// linux/arm/v7 is one of the published images: there int IS int32, so
+		// the conversion cannot truncate and there is nothing to close.
+		t.Skip("int is 32 bits here; SERVERMODE cannot truncate into int32")
+	}
+
+	a := &App{}
+	a.gameState.Store(stateIdle)
+
+	// 2^32 + 1. Narrowed to int32 that is exactly 1 — "idle", and inside
+	// printServerSafe's allowlist. Built from a variable shift so the constant
+	// cannot overflow int when this file is compiled for 32-bit.
+	bits := 32
+	truncatesToIdle := int(int64(1)<<bits | 1)
+
+	a.noteServerMode(truncatesToIdle)
+
+	if got := a.serverMode.Load(); got == 1 {
+		t.Fatal("an out-of-range mode truncated into the safe allowlist")
+	}
+	if printServerSafe(int(a.serverMode.Load())) {
+		t.Error("an unreadable server mode must not be treated as safe")
+	}
+	if gameActive(int(a.serverMode.Load())) {
+		t.Error("an unreadable server mode must not be claimed as an active game either")
+	}
+	if a.printServerGate() == nil {
+		t.Error("the print-server gate must stay closed on an unreadable mode")
+	}
+
+	// A mode that fits is still recorded exactly.
+	a.noteServerMode(6)
+	if got := a.serverMode.Load(); got != 6 {
+		t.Fatalf("serverMode = %d, want 6", got)
 	}
 }
 
