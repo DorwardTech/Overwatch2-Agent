@@ -36,7 +36,7 @@ PC itself is the usual choice; the one thing to know about that is under
    > release before running it:
    >
    > ```powershell
-   > Get-FileHash .\overwatch-agent_1.3.3_windows_setup.exe -Algorithm SHA256
+   > Get-FileHash .\overwatch-agent_1.5.0_windows_setup.exe -Algorithm SHA256
    > ```
 
    The installer copies the agent to `C:\Program Files\Overwatch Agent\` and
@@ -57,11 +57,23 @@ PC itself is the usual choice; the one thing to know about that is under
    - **Overwatch address** and **site token** — from Overwatch: *Sites* → edit
      this venue → generate a token. Press **Test this connection**: it tells you
      straight away whether the address is right and the token was accepted.
-   - **Game server address** — `127.0.0.1` if the agent is on the game server
-     itself, otherwise its address on the venue network. **Test this
-     connection** too.
+   - **Where the games come from** — **O-Zone** unless you have been told this
+     venue runs **Nexus**. The choice swaps the fields underneath it, because
+     the two systems are read completely differently.
+     - *O-Zone*: **Game server address** — `127.0.0.1` if the agent is on the
+       game server itself, otherwise its address on the venue network. **Test
+       this connection** too.
+     - *Nexus*: the **Nexus database** and the **management app address**. Both
+       are needed, and one **Test these connections** button checks both and
+       says which one is unhappy. See [Nexus venues](#nexus-venues-legacy-mode).
    - **What the agent should do** — leave these alone unless you have been told
-     otherwise.
+     otherwise. A new venue arrives with scoresheets and the local game cache
+     both on, which is what you want: the cache is what lets the agent answer
+     the printing software without touching the game server during play, and
+     what it restores from after an outage. It listens on the venue network for
+     the printing software, so untick it if this machine should open no ports.
+     (Nexus venues do not see this section: the scoresheet and print-server
+     settings are O-Zone-only.)
 
    Then press **Save and start the agent**. The page installs or restarts the
    service and shows the agent's log so you can watch it connect.
@@ -83,7 +95,7 @@ the identical agent:
    check it against `SHA256SUMS.txt` from the same release:
 
    ```powershell
-   Get-FileHash .\overwatch-agent_1.3.3_windows_amd64.zip -Algorithm SHA256
+   Get-FileHash .\overwatch-agent_1.5.0_windows_amd64.zip -Algorithm SHA256
    ```
 
 2. **Extract** it to `C:\Program Files\Overwatch Agent\`. Keep the executable
@@ -108,7 +120,7 @@ The installer itself takes the usual Inno Setup switches, so a scripted rollout
 can run it unattended:
 
 ```powershell
-.\overwatch-agent_1.3.3_windows_setup.exe /VERYSILENT /NORESTART
+.\overwatch-agent_1.5.0_windows_setup.exe /VERYSILENT /NORESTART
 ```
 
 A silent install registers and configures the service but does not open the
@@ -125,6 +137,9 @@ directly if you prefer. Open it from an elevated prompt, set at least:
 | `CENTRAL_API_URL` | `https://ow2.lasertag.net.au/api/agent/ingest` |
 | `AGENT_TOKEN` | the site's token, `OW2_<id>_<secret>` |
 | `OZONE_WS_HOST` | `127.0.0.1` on the game server PC, otherwise its LAN IP |
+
+For a Nexus venue, set `AGENT_MODE=legacy` with `NEXUS_DSN` and `LASERTAG_URL`
+instead of `OZONE_WS_HOST` — see [Nexus venues](#nexus-venues-legacy-mode).
 
 ```powershell
 notepad "C:\ProgramData\Overwatch Agent\agent.env"
@@ -181,6 +196,38 @@ table — with these defaults on Windows:
 
 After changing the file by hand, restart the service:
 `.\overwatch-agent.exe restart`. The setup page does that for you.
+
+## Nexus venues (legacy mode)
+
+Some venues still run the previous-generation Nexus system rather than O-Zone.
+The agent reads those the same way it does anywhere else — one binary, one
+service, the same installer — but from a different pair of sources:
+
+| Setting | What it is |
+|---|---|
+| `AGENT_MODE` | `legacy` |
+| `NEXUS_DSN` | the Nexus database, as `user:password@tcp(host:3306)/ng_system` |
+| `LASERTAG_URL` | the on-box management app, e.g. `http://127.0.0.1/lasertag` |
+| `GAME_SYNC_INTERVAL` | seconds between collections of finished games (default 30) |
+
+Pick **Nexus** on the setup page and it writes all of these for you.
+
+Two things to get right:
+
+- **The database account should be read-only.** The agent never writes to
+  Nexus, and the database it opens holds member records. Give it `SELECT` on
+  `ng_system` and nothing more. The startup line prints the connection with the
+  password removed, so the log does not become a place the credential lives.
+- **`LASERTAG_URL` is the folder the app lives in**, with no trailing slash and
+  not one of its pages — the agent appends its own paths to it. The setup page
+  rejects the common mistakes rather than letting them fail later.
+
+The O-Zone-only settings are ignored in this mode: `ENABLE_GAME_RESULTS`, the
+print-server cache, the proxy and the message bus. There is no print server at
+a Nexus venue, so there is nothing to cache or protect — finished games come
+out of the database directly. Switching a venue between the two modes on the
+setup page leaves the other mode's settings in `agent.env` commented out rather
+than deleting them, so switching back restores what was there.
 
 ## Running on the game server PC
 

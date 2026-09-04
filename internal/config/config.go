@@ -123,6 +123,11 @@ func Load() (Config, error) {
 	if c.Token == "" {
 		return c, fmt.Errorf("AGENT_TOKEN is required")
 	}
+	// Read case-insensitively, and store the word the rest of the agent
+	// compares against. AGENT_MODE=Legacy in a hand-written file used to be
+	// silently taken as an O-Zone venue — no error, just the wrong half of the
+	// agent running — and the setup page reads the same file.
+	c.Mode = strings.ToLower(strings.TrimSpace(c.Mode))
 	if c.Mode == "legacy" {
 		if c.NexusDSN == "" {
 			return c, fmt.Errorf("NEXUS_DSN is required in legacy mode")

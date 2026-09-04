@@ -17,15 +17,15 @@
 ; ci.yml on every change so the script is never first exercised at release time.
 ; To build it by hand, stage the two release archives and point ISCC at them:
 ;
-;   Expand-Archive overwatch-agent_1.3.3_windows_amd64.zip -DestinationPath stage\amd64
-;   Expand-Archive overwatch-agent_1.3.3_windows_arm64.zip -DestinationPath stage\arm64
+;   Expand-Archive overwatch-agent_1.5.0_windows_amd64.zip -DestinationPath stage\amd64
+;   Expand-Archive overwatch-agent_1.5.0_windows_arm64.zip -DestinationPath stage\arm64
 ;
 ; both run from the repository root, which is what SourceDir below anchors to:
 ;
 ;   & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" `
-;       /DAppVersion=1.3.3 `
-;       /DAmd64Dir=stage\amd64\overwatch-agent_1.3.3_windows_amd64 `
-;       /DArm64Dir=stage\arm64\overwatch-agent_1.3.3_windows_arm64 `
+;       /DAppVersion=1.5.0 `
+;       /DAmd64Dir=stage\amd64\overwatch-agent_1.5.0_windows_amd64 `
+;       /DArm64Dir=stage\arm64\overwatch-agent_1.5.0_windows_arm64 `
 ;       packaging\windows\overwatch-agent.iss
 ;
 ; Requires Inno Setup 6.3 or later, for the Arm64 architecture identifiers.
