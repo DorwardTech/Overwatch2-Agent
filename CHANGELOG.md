@@ -6,6 +6,84 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 The Site Agent and central Overwatch are versioned independently.
 
+## [1.5.0] — 2026-09-04
+
+### Changed
+
+- **A new venue set up through the wizard gets the local game cache.** The
+  checkbox that turns it on started unticked, and the person installing at a
+  venue is whoever is on shift — they have no reason to tick a box nobody told
+  them about. So a Windows venue installed the easy way ended up with no local
+  copy of its finished games, nothing answering the printing software while play
+  was on, and nothing to restore from after an outage. The three things the
+  cache exists for, all off, silently.
+
+  It starts ticked now. Only for a venue that has never been configured: a venue
+  that has been through the page before has an explicit `ENABLE_CACHE` in its
+  file either way and keeps whatever it was set to, and the page writes the
+  choice out rather than relying on a default, so nothing changes underneath a
+  venue that already decided.
+
+  **The agent's own default is untouched and stays off.** That one governs every
+  agent in the fleet at its next upgrade, including the Linux venues nobody
+  asked — a venue being configured is a different thing from a venue already
+  running, and only the first is what this changes. There is a test for each.
+
+  The box turns on a listener for the printing software, so the page and
+  WINDOWS.md now both say so where the choice is made, for a machine that should
+  open no ports.
+
+## [1.4.0] — 2026-09-04
+
+### Added
+
+- **Legacy (Nexus) venues can be set up from the setup page.** The agent has
+  read Nexus venues for as long as it has read current ones —
+  `AGENT_MODE=legacy` with `NEXUS_DSN` and `LASERTAG_URL` — and that code has
+  always built and run on Windows. What did not exist was any way to *say so* on
+  a Windows machine short of hand-editing `agent.env`, which is the exact job
+  the installer and the setup page were built to remove.
+
+  Worse than absent: the page actively refused. It required a game server
+  address whatever the venue ran, and a Nexus venue does not have one, so the
+  form could not be submitted at all. A legacy venue installed through the
+  wizard hit a validation error it could not satisfy.
+
+  The page now asks which system the venue runs, and the answer swaps what it
+  shows: a current venue is asked for its game server, a Nexus venue for its
+  database and its management app. Both get a **Test** button that proves the
+  connections before anything is saved — for Nexus that is one press covering
+  both, reported separately, because a database grant and a web server are
+  different problems with different fixes.
+
+  The starter `agent.env` and WINDOWS.md now describe the mode and its settings
+  rather than assuming there is only one kind of venue.
+
+### Changed
+
+- **Switching a venue between modes parks the other mode's settings rather than
+  deleting them.** Saving a current venue comments out `NEXUS_DSN` instead of
+  removing it, and the reverse for the game server settings, so a venue's
+  database password survives someone opening the setup page — and switching
+  back turns the same line on again with what was there before.
+
+- The scoresheet, cache, proxy and message-bus options are hidden for a Nexus
+  venue. They were always ignored in that mode — there is no print server at a
+  Nexus venue — but the page offered them as though they did something.
+
+- `AGENT_MODE` is now written explicitly on every save. It was previously left
+  out when it matched the default, so the file did not say which system the
+  venue ran and the reader had to know what the default was.
+
+### Fixed
+
+- **`AGENT_MODE` is read case-insensitively, and trimmed.** It was compared
+  exactly, so `AGENT_MODE=Legacy` — or the same word with a stray space, both
+  easy to write in a hand-edited file — was silently taken as a current venue.
+  No error, no warning: just the wrong half of the agent running against a venue
+  that has nothing for it to talk to. The setup page reads the same file, so the
+  two had to agree on what the word means.
+
 ## [1.3.3] — 2026-09-02
 
 ### Added

@@ -99,31 +99,64 @@
   </div>
 
   <div class="card">
-    <h2>2. The game server</h2>
-    <p class="hint">Where the laser-tag game server runs. If the agent is installed on that same computer, use <code>127.0.0.1</code>.</p>
+    <h2>2. Where the games come from</h2>
+    <p class="hint">Which system this venue runs its games on. If nobody has told you otherwise, it is the first one.</p>
 
-    <div class="row">
-      <div>
-        <label for="ozoneHost">Game server address <span class="var">OZONE_WS_HOST</span></label>
-        <input id="ozoneHost" type="text" spellcheck="false" placeholder="127.0.0.1">
-      </div>
-      <div class="narrow">
-        <label for="ozonePort">Port <span class="var">OZONE_WS_PORT</span></label>
-        <input id="ozonePort" type="text" spellcheck="false" placeholder="12113">
-      </div>
+    <div class="checkline">
+      <input type="radio" name="mode" id="modeOzone" value="ozone">
+      <label for="modeOzone">O-Zone
+        <span class="desc">The current game system. The agent reads live play from it over the venue network.</span>
+      </label>
     </div>
-    <button type="button" class="link" id="thisMachine">Use this computer (127.0.0.1)</button>
+    <div class="checkline">
+      <input type="radio" name="mode" id="modeLegacy" value="legacy">
+      <label for="modeLegacy">Nexus <span class="var">AGENT_MODE=legacy</span>
+        <span class="desc">The older system, still running at some venues. The agent reads its database and its management app instead.</span>
+      </label>
+    </div>
 
-    <div class="row" style="margin-top:8px">
-      <button type="button" id="testGame">Test this connection</button>
+    <div id="ozoneBox" style="margin-top:16px">
+      <p class="hint">Where the game server runs. If the agent is installed on that same computer, use <code>127.0.0.1</code>.</p>
+      <div class="row">
+        <div>
+          <label for="ozoneHost">Game server address <span class="var">OZONE_WS_HOST</span></label>
+          <input id="ozoneHost" type="text" spellcheck="false" placeholder="127.0.0.1">
+        </div>
+        <div class="narrow">
+          <label for="ozonePort">Port <span class="var">OZONE_WS_PORT</span></label>
+          <input id="ozonePort" type="text" spellcheck="false" placeholder="12113">
+        </div>
+      </div>
+      <button type="button" class="link" id="thisMachine">Use this computer (127.0.0.1)</button>
+
+      <div class="row" style="margin-top:8px">
+        <button type="button" id="testGame">Test this connection</button>
+      </div>
+      <div class="msg" id="gameMsg"></div>
     </div>
-    <div class="msg" id="gameMsg"></div>
+
+    <div id="legacyBox" style="display:none;margin-top:16px">
+      <p class="hint">A Nexus venue needs both: the database the games are recorded in, and the management app that reports which packs are live.</p>
+      <label for="nexusDsn">Nexus database <span class="var">NEXUS_DSN</span></label>
+      <input id="nexusDsn" type="text" spellcheck="false" placeholder="user:password@tcp(127.0.0.1:3306)/ng_system">
+      <p class="hint">A read-only account is enough, and is what this should be. The agent never writes to Nexus.</p>
+
+      <label for="lasertagUrl">Management app address <span class="var">LASERTAG_URL</span></label>
+      <input id="lasertagUrl" type="text" spellcheck="false" placeholder="http://127.0.0.1/lasertag">
+      <p class="hint">The folder the app lives in — no trailing slash, and not one of its pages.</p>
+
+      <div class="row" style="margin-top:8px">
+        <button type="button" id="testLegacy">Test these connections</button>
+      </div>
+      <div class="msg" id="legacyMsg"></div>
+    </div>
   </div>
 
   <div class="card">
     <h2>3. What the agent should do</h2>
     <p class="hint">Leave these as they are unless you have been told otherwise.</p>
 
+    <div id="ozoneOnly">
     <div class="checkline">
       <input type="checkbox" id="results">
       <label for="results">Collect scoresheets after each game
@@ -134,13 +167,14 @@
     <div class="checkline">
       <input type="checkbox" id="cache">
       <label for="cache">Keep a local copy of finished games, and serve them to the scoresheet printer
-        <span class="desc">The agent collects finished games while the venue is idle and answers the printing software from its own copy, so the game server is never asked for data during play.</span>
+        <span class="desc">The agent collects finished games while the venue is idle and answers the printing software from its own copy, so the game server is never asked for data during play. Recommended, and on for a new venue. It listens on the address below for the printing software, so leave it off if this machine should open no ports.</span>
       </label>
     </div>
     <div id="proxyBox" style="display:none">
       <label for="proxyAddr">Where the printing software should connect <span class="var">PROXY_LISTEN_ADDR</span></label>
       <input id="proxyAddr" type="text" spellcheck="false" placeholder="0.0.0.0:12124">
       <div class="msg warn show" id="proxyWarn" style="display:none"></div>
+    </div>
     </div>
 
     <div class="checkline">
@@ -179,6 +213,10 @@
           <input id="slow" type="text" spellcheck="false" placeholder="60">
         </div>
       </div>
+      <div id="syncBox" style="display:none">
+        <label for="gameSync">How often to collect finished Nexus games, seconds <span class="var">GAME_SYNC_INTERVAL</span></label>
+        <input id="gameSync" type="text" spellcheck="false" placeholder="30">
+      </div>
       <label for="health">Health address <span class="var">HEALTH_ADDR</span></label>
       <input id="health" type="text" spellcheck="false" placeholder="127.0.0.1:8088">
       <div class="msg warn show" style="display:block;margin-top:10px">Keep the idle figure below 30 seconds, or Overwatch will keep marking this venue offline between updates.</div>
@@ -216,15 +254,18 @@ const $ = (id) => document.getElementById(id);
 const FIELDS = {
   CENTRAL_API_URL: "central", AGENT_TOKEN: "token",
   OZONE_WS_HOST: "ozoneHost", OZONE_WS_PORT: "ozonePort",
+  NEXUS_DSN: "nexusDsn", LASERTAG_URL: "lasertagUrl", GAME_SYNC_INTERVAL: "gameSync",
   PROXY_LISTEN_ADDR: "proxyAddr", ADMIN_API_ADDR: "adminAddr", ADMIN_API_TOKEN: "adminToken",
   POLL_INTERVAL: "poll", IDLE_POLL_INTERVAL: "idle", SLOW_POLL_INTERVAL: "slow", HEALTH_ADDR: "health",
 };
 const DEFAULTS = {
   CENTRAL_API_URL: "https://ow2.lasertag.net.au/api/agent/ingest",
   OZONE_WS_HOST: "127.0.0.1", OZONE_WS_PORT: "12113",
+  GAME_SYNC_INTERVAL: "30",
   PROXY_LISTEN_ADDR: "0.0.0.0:12124", ADMIN_API_ADDR: "0.0.0.0:8097",
   POLL_INTERVAL: "5", IDLE_POLL_INTERVAL: "15", SLOW_POLL_INTERVAL: "60", HEALTH_ADDR: "127.0.0.1:8088",
 };
+function legacyMode() { return $("modeLegacy").checked; }
 
 async function api(path, options = {}) {
   const res = await fetch(path, {
@@ -255,8 +296,17 @@ async function load() {
   for (const [key, id] of Object.entries(FIELDS)) {
     $(id).value = v[key] !== undefined && v[key] !== "" ? v[key] : (DEFAULTS[key] || "");
   }
+  const legacy = String(v.AGENT_MODE || "").trim().toLowerCase() === "legacy";
+  $("modeLegacy").checked = legacy;
+  $("modeOzone").checked = !legacy;
   $("results").checked = v.ENABLE_GAME_RESULTS === undefined ? true : truthy(v.ENABLE_GAME_RESULTS);
-  $("cache").checked = truthy(v.ENABLE_CACHE);
+  // Unset means a venue nobody has configured yet — a fresh install, whose
+  // starter agent.env has the cache block commented out. Those get the cache,
+  // because a venue without it has no local copy of its games, nothing
+  // answering the printing software while play is on, and nothing to restore
+  // from. A venue that has been through this page before has an explicit
+  // ENABLE_CACHE either way, and keeps whatever it was set to.
+  $("cache").checked = v.ENABLE_CACHE === undefined ? true : truthy(v.ENABLE_CACHE);
   $("admin").checked = !!(v.ADMIN_API_ADDR && v.ADMIN_API_TOKEN);
   toggles();
   if (body.warning) show($("saveMsg"), "warn", escapeHTML(body.warning));
@@ -264,6 +314,14 @@ async function load() {
 }
 
 function toggles() {
+  const legacy = legacyMode();
+  $("ozoneBox").style.display = legacy ? "none" : "block";
+  $("legacyBox").style.display = legacy ? "block" : "none";
+  // Scoresheets, the local copy and the print-server proxy are all O-Zone
+  // things: legacy mode reads finished games straight out of the Nexus
+  // database, so there is no print server to protect and nothing to proxy.
+  $("ozoneOnly").style.display = legacy ? "none" : "block";
+  $("syncBox").style.display = legacy ? "block" : "none";
   $("proxyBox").style.display = $("cache").checked ? "block" : "none";
   $("adminBox").style.display = $("admin").checked ? "block" : "none";
   const addr = $("proxyAddr").value || "";
@@ -278,12 +336,27 @@ function toggles() {
 function collect() {
   const s = {};
   for (const [key, id] of Object.entries(FIELDS)) s[key] = $(id).value.trim();
-  s.ENABLE_GAME_RESULTS = String($("results").checked);
-  const cache = $("cache").checked;
-  s.ENABLE_CACHE = String(cache);
-  s.ENABLE_PROXY = String(cache);
-  s.ENABLE_MSG_BUS = String(cache);
-  if (!cache) s.PROXY_LISTEN_ADDR = "";
+  const legacy = legacyMode();
+  s.AGENT_MODE = legacy ? "legacy" : "ozone";
+  if (legacy) {
+    // Written blank rather than left alone, so switching a venue over does not
+    // leave the previous mode's settings behind to confuse the next reader.
+    s.ENABLE_GAME_RESULTS = "";
+    s.ENABLE_CACHE = "";
+    s.ENABLE_PROXY = "";
+    s.ENABLE_MSG_BUS = "";
+    s.PROXY_LISTEN_ADDR = "";
+  } else {
+    s.ENABLE_GAME_RESULTS = String($("results").checked);
+    const cache = $("cache").checked;
+    s.ENABLE_CACHE = String(cache);
+    s.ENABLE_PROXY = String(cache);
+    s.ENABLE_MSG_BUS = String(cache);
+    if (!cache) s.PROXY_LISTEN_ADDR = "";
+    s.NEXUS_DSN = "";
+    s.LASERTAG_URL = "";
+    s.GAME_SYNC_INTERVAL = "";
+  }
   if (!$("admin").checked) { s.ADMIN_API_ADDR = ""; s.ADMIN_API_TOKEN = ""; }
   return s;
 }
@@ -331,6 +404,8 @@ $("cache").addEventListener("change", toggles);
 $("admin").addEventListener("change", toggles);
 $("proxyAddr").addEventListener("input", toggles);
 $("ozoneHost").addEventListener("input", toggles);
+$("modeOzone").addEventListener("change", toggles);
+$("modeLegacy").addEventListener("change", toggles);
 
 $("testCentral").addEventListener("click", (e) => busy(e.target, async () => {
   hide($("centralMsg"));
@@ -348,6 +423,15 @@ $("testGame").addEventListener("click", (e) => busy(e.target, async () => {
     body: JSON.stringify({ host: $("ozoneHost").value.trim(), port: $("ozonePort").value.trim() }),
   });
   show($("gameMsg"), r.ok ? "ok" : "bad", escapeHTML(r.message));
+}));
+
+$("testLegacy").addEventListener("click", (e) => busy(e.target, async () => {
+  hide($("legacyMsg"));
+  const r = await api("/api/test/legacy", {
+    method: "POST",
+    body: JSON.stringify({ dsn: $("nexusDsn").value.trim(), url: $("lasertagUrl").value.trim() }),
+  });
+  show($("legacyMsg"), r.ok ? "ok" : "bad", escapeHTML(r.message));
 }));
 
 $("save").addEventListener("click", (e) => busy(e.target, save));

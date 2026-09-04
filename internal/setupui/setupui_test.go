@@ -122,8 +122,13 @@ func TestReadsAndWritesTheConfigFile(t *testing.T) {
 	}
 	text := string(saved)
 	for _, want := range []string{
-		"# venue note",                // the operator's comment survives
-		"NEXUS_DSN=keep:me@tcp(h)/db", // a setting the form never shows survives
+		"# venue note", // the operator's comment survives
+		// The form manages NEXUS_DSN now, and this save is an O-Zone one, so the
+		// legacy setting is parked behind a comment rather than deleted: the
+		// venue's database password is still in the file, and switching the mode
+		// back turns the same line on again.
+		"# NEXUS_DSN=keep:me@tcp(h)/db",
+		"AGENT_MODE=ozone",
 		"CENTRAL_API_URL=https://ow2.example/api/agent/ingest", // and the change landed
 		"AGENT_TOKEN=OW2_1_abc",
 	} {
@@ -333,6 +338,184 @@ func TestGameServerTestAcceptsAnIPv6Address(t *testing.T) {
 	for _, host := range []string{"::1", "2001:db8::1", "127.0.0.1", "ozone-pc.venue.local"} {
 		if problem := gameServerProblem(host, "12113"); problem != "" {
 			t.Errorf("gameServerProblem(%q) = %q, want no problem", host, problem)
+		}
+	}
+}
+
+// A Nexus venue has no O-Zone server to name. Before the page understood the
+// mode it required one anyway, so the form could not be submitted at all —
+// which is the whole reason legacy mode was unreachable from the installer.
+func TestLegacyModeDoesNotRequireAGameServer(t *testing.T) {
+	legacy := settings{
+		CentralURL:  "https://ow2.example/api/agent/ingest",
+		Token:       "OW2_1_abc",
+		Mode:        "legacy",
+		NexusDSN:    "ow2ro:pw@tcp(10.0.0.2:3306)/ng_system",
+		LasertagURL: "http://10.0.0.2/lasertag",
+	}
+	if problems := legacy.validate(); len(problems) > 0 {
+		t.Fatalf("a complete legacy venue was rejected: %v", problems)
+	}
+	// The same settings without the mode are an O-Zone venue missing its server.
+	ozone := legacy
+	ozone.Mode = "ozone"
+	if problems := ozone.validate(); len(problems) == 0 {
+		t.Fatal("an O-Zone venue with no game server address was accepted")
+	}
+}
+
+func TestLegacyModeRequiresItsOwnTwoSettings(t *testing.T) {
+	base := settings{
+		CentralURL: "https://ow2.example/api/agent/ingest",
+		Token:      "OW2_1_abc",
+		Mode:       "legacy",
+	}
+	for _, tc := range []struct {
+		name string
+		in   settings
+		want string
+	}{
+		{"neither", base, "Nexus database"},
+		{"no app", func() settings { s := base; s.NexusDSN = "u:p@tcp(h:3306)/ng_system"; return s }(), "management app"},
+		{"no database", func() settings { s := base; s.LasertagURL = "http://h/lasertag"; return s }(), "Nexus database"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			problems := tc.in.validate()
+			if len(problems) == 0 {
+				t.Fatal("an incomplete legacy venue was accepted")
+			}
+			if !strings.Contains(strings.Join(problems, " "), tc.want) {
+				t.Errorf("problems %v do not mention %q", problems, tc.want)
+			}
+		})
+	}
+}
+
+func TestNexusDSNProblem(t *testing.T) {
+	for _, tc := range []struct{ name, dsn, want string }{
+		{"good", "ow2ro:pw@tcp(10.0.0.2:3306)/ng_system", ""},
+		{"good with params", "ow2ro:pw@tcp(h:3306)/ng_system?parseTime=true", ""},
+		{"jdbc style", "mysql://ow2ro:pw@10.0.0.2/ng_system", "mysql://"},
+		{"no at", "ow2ro-pw-tcp(h)/ng_system", "missing its @"},
+		{"no credentials", "@tcp(h:3306)/ng_system", "username and password"},
+		{"bare host", "ow2ro:pw@10.0.0.2/ng_system", "tcp(...)"},
+		{"no database", "ow2ro:pw@tcp(10.0.0.2:3306)", "database name"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := nexusDSNProblem(tc.dsn)
+			if tc.want == "" && got != "" {
+				t.Fatalf("a usable DSN was rejected: %s", got)
+			}
+			if tc.want != "" && !strings.Contains(got, tc.want) {
+				t.Fatalf("problem for %q = %q, want it to mention %q", tc.dsn, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestLasertagURLProblem(t *testing.T) {
+	for _, tc := range []struct{ name, url, want string }{
+		{"good", "http://10.0.0.2/lasertag", ""},
+		{"good https", "https://venue.example/lasertag", ""},
+		{"no scheme", "10.0.0.2/lasertag", "http://"},
+		{"trailing slash", "http://10.0.0.2/lasertag/", "trailing slash"},
+		{"a page", "http://10.0.0.2/lasertag/api/health.php", "not one of its pages"},
+		{"credentials", "http://u:p@10.0.0.2/lasertag", "Remove the username"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := lasertagURLProblem(tc.url)
+			if tc.want == "" && got != "" {
+				t.Fatalf("a usable address was rejected: %s", got)
+			}
+			if tc.want != "" && !strings.Contains(got, tc.want) {
+				t.Fatalf("problem for %q = %q, want it to mention %q", tc.url, got, tc.want)
+			}
+		})
+	}
+}
+
+// Switching an existing O-Zone venue to legacy must leave it configured for
+// legacy and nothing else: the O-Zone settings parked, the Nexus pair live.
+func TestSwitchingModeParksTheOtherModesSettings(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agent.env")
+	existing := "CENTRAL_API_URL=https://ow2.example/api/agent/ingest\nOZONE_WS_HOST=127.0.0.1\nENABLE_CACHE=true\n"
+	if err := os.WriteFile(path, []byte(existing), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, h := newTestServer(t, path)
+
+	body := `{"CENTRAL_API_URL":"https://ow2.example/api/agent/ingest","AGENT_TOKEN":"OW2_1_abc",
+	  "AGENT_MODE":"legacy","NEXUS_DSN":"ow2ro:pw@tcp(10.0.0.2:3306)/ng_system",
+	  "LASERTAG_URL":"http://10.0.0.2/lasertag","GAME_SYNC_INTERVAL":"30",
+	  "OZONE_WS_HOST":"","OZONE_WS_PORT":"","ENABLE_GAME_RESULTS":"","ENABLE_CACHE":"",
+	  "ENABLE_PROXY":"","ENABLE_MSG_BUS":"","PROXY_LISTEN_ADDR":""}`
+	if w := do(t, h, http.MethodPost, "/api/config", s.key, body); w.Code != http.StatusOK {
+		t.Fatalf("save failed: %d %s", w.Code, w.Body.String())
+	}
+
+	saved, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(saved)
+	for _, want := range []string{
+		"AGENT_MODE=legacy",
+		"NEXUS_DSN=ow2ro:pw@tcp(10.0.0.2:3306)/ng_system",
+		"LASERTAG_URL=http://10.0.0.2/lasertag",
+		"# OZONE_WS_HOST=127.0.0.1", // parked, not deleted
+		"# ENABLE_CACHE=true",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("saved file is missing %q:\n%s", want, text)
+		}
+	}
+
+	// And the page reads its own file back as a legacy venue.
+	got := decode(t, do(t, h, http.MethodGet, "/api/config", s.key, ""))
+	values, _ := got["values"].(map[string]any)
+	if values["AGENT_MODE"] != "legacy" {
+		t.Errorf("the page read the mode back as %v, want legacy", values["AGENT_MODE"])
+	}
+	if values["OZONE_WS_HOST"] != nil {
+		t.Errorf("a parked setting was read back as live: %v", values["OZONE_WS_HOST"])
+	}
+}
+
+// A venue installed through the wizard used to get no cache, no proxy and no
+// failover restore, because the checkbox that turns all three on started
+// unticked and nobody on shift had a reason to tick it. It starts ticked now,
+// for a venue that has never been configured.
+//
+// This asserts on the shipped page rather than on behaviour, because the
+// defaulting happens in the browser: what it can prove is that the cache
+// checkbox is defaulted the same way the scoresheet one is — "on unless the
+// file says otherwise" — and that a saved value still wins. What it cannot
+// prove is that the page renders; the render test above covers that.
+func TestTheCacheCheckboxDefaultsOnForANewVenue(t *testing.T) {
+	page, err := uiFS.ReadFile("ui.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(page)
+
+	for _, want := range []string{
+		`$("cache").checked = v.ENABLE_CACHE === undefined ? true : truthy(v.ENABLE_CACHE);`,
+		`$("results").checked = v.ENABLE_GAME_RESULTS === undefined ? true : truthy(v.ENABLE_GAME_RESULTS);`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("the page no longer defaults a setting on for a new venue:\n  want %s", want)
+		}
+	}
+
+	// The unticked box must still turn all three off, or "leave it off" on a
+	// machine that should open no ports would not mean anything.
+	for _, want := range []string{
+		`s.ENABLE_CACHE = String(cache);`,
+		`s.ENABLE_PROXY = String(cache);`,
+		`s.ENABLE_MSG_BUS = String(cache);`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("the cache checkbox no longer drives all three settings:\n  want %s", want)
 		}
 	}
 }

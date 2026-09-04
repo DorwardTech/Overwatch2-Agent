@@ -59,8 +59,12 @@ running on the game server PC itself, upgrading and troubleshooting.
 |---|---|---|---|
 | `CENTRAL_API_URL` | ✅ | — | Full ingest endpoint, e.g. `https://ow2.lasertag.net.au/api/agent/ingest` |
 | `AGENT_TOKEN` | ✅ | — | This venue's token (`OW2_<id>_<secret>`), issued from the Sites screen |
-| `OZONE_WS_HOST` | | `127.0.0.1` | O-Zone server host. Use `host.docker.internal` if it runs on the Docker host |
-| `OZONE_WS_PORT` | | `12113` | O-Zone WebSocket port |
+| `AGENT_MODE` | | `ozone` | Which system this venue runs: `ozone`, or `legacy` for a Nexus venue |
+| `OZONE_WS_HOST` | | `127.0.0.1` | O-Zone server host (ozone mode). Use `host.docker.internal` if it runs on the Docker host |
+| `OZONE_WS_PORT` | | `12113` | O-Zone WebSocket port (ozone mode) |
+| `NEXUS_DSN` | legacy | — | Nexus database, `user:password@tcp(host:3306)/ng_system`. Read-only account |
+| `LASERTAG_URL` | legacy | — | On-box management app, at the folder it lives in — no trailing slash |
+| `GAME_SYNC_INTERVAL` | | `30` | Seconds between collections of finished Nexus games (legacy mode) |
 | `POLL_INTERVAL` | | `5` | Seconds between fast polls (server state + active packs) |
 | `SLOW_POLL_INTERVAL` | | `60` | Seconds between slow polls (teams, games, licences) |
 | `BUFFER_MAX` | | `2000` | Max telemetry batches buffered while central is unreachable |
