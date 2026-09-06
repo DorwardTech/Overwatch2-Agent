@@ -132,27 +132,28 @@ func fetchBackoff(attempts int) time.Duration {
 }
 
 type App struct {
-	cfg          config.Config
-	pusher       *push.Pusher
-	buf          *buffer.Buffer
-	health       *health.Health
-	seq          int64
-	startedAt    time.Time
-	lastGameNum  int
-	lastBusGame  int          // game number from the most recent GAME_START bus event
-	serverMode   atomic.Int32 // latest O-Zone SERVERMODE
-	serverModeAt atomic.Int64 // unix nanos when serverMode was last read (0 = never)
-	gameState    atomic.Int32 // idle/active/finishing (Message Bus driven)
-	fetchedGames map[int]bool
-	pendingFetch map[int]*pendingGame // finished games awaiting a safe (non-game) window
-	givenUpFetch map[int]bool         // games abandoned after maxFetchAttempts
-	mu           sync.Mutex           // guards fetchedGames + pendingFetch + givenUpFetch + lastBusGame
-	resultsMu    sync.Mutex           // serialises O-Zone results-API access
-	cmdBusy      atomic.Bool          // single-flight for command processing
-	collectBusy  atomic.Bool          // single-flight for a "collect from central" run
-	fetchBusy    atomic.Bool          // single-flight for a pending-results drain
-	failoverSem  chan struct{}        // bounds concurrent failover payload copies
-	stopRun      context.CancelFunc   // set by Run; requestShutdown cancels it (graceful reboot)
+	cfg             config.Config
+	pusher          *push.Pusher
+	buf             *buffer.Buffer
+	health          *health.Health
+	seq             int64
+	startedAt       time.Time
+	lastGameNum     int
+	lastBusGame     int          // game number from the most recent GAME_START bus event
+	serverMode      atomic.Int32 // latest O-Zone SERVERMODE
+	serverModeAt    atomic.Int64 // unix nanos when serverMode was last read (0 = never)
+	gameState       atomic.Int32 // idle/active/finishing (Message Bus driven)
+	fetchedGames    map[int]bool
+	pendingFetch    map[int]*pendingGame // finished games awaiting a safe (non-game) window
+	givenUpFetch    map[int]bool         // games abandoned after maxFetchAttempts
+	mu              sync.Mutex           // guards fetchedGames + pendingFetch + givenUpFetch + lastBusGame
+	resultsMu       sync.Mutex           // serialises O-Zone results-API access
+	cmdBusy         atomic.Bool          // single-flight for command processing
+	collectBusy     atomic.Bool          // single-flight for a "collect from central" run
+	fetchBusy       atomic.Bool          // single-flight for a pending-results drain
+	printServerBusy atomic.Int32         // depth of in-progress print-server work (see nextPollInterval)
+	failoverSem     chan struct{}        // bounds concurrent failover payload copies
+	stopRun         context.CancelFunc   // set by Run; requestShutdown cancels it (graceful reboot)
 
 	store  *store.Store   // local verbatim game cache (nil if disabled/unavailable)
 	cache  *cache.Cache   // O-Zone-shaped view over the store
@@ -390,16 +391,36 @@ func (a *App) pollLoop(ctx context.Context, client *ozone.Client) {
 			if !poll() {
 				return
 			}
-			// Fast while a game is active; idle rate otherwise. The idle rate is
-			// kept short enough to stay within central's agent-offline window so
-			// the agent never flaps "offline" between idle pushes.
-			next := a.cfg.IdlePollInterval
-			if gameActive(int(a.serverMode.Load())) || a.gameState.Load() == stateActive {
-				next = a.cfg.PollInterval
-			}
-			timer.Reset(next)
+			timer.Reset(a.nextPollInterval())
 		}
 	}
+}
+
+// nextPollInterval picks the cadence for the next poll.
+//
+// Fast while a game is active, idle rate otherwise. The idle rate is kept short
+// enough to stay inside central's agent-offline window, so the agent never flaps
+// "offline" between idle pushes.
+//
+// Fast ALSO while print-server work is in progress, and that one is a safety
+// property rather than a nicety. collect() is the only thing that ever discovers
+// a game has started, so the idle gate every print-server operation re-checks
+// can be no more current than the last poll. Between polls the agent is blind: a
+// game starting just after an idle reading stays invisible for up to
+// IdlePollInterval, and a results drain or a backfill would keep opening NEW
+// fetches straight through that gap. Polling at the in-game rate while the agent
+// is touching the print server shrinks that blind spot from the idle interval to
+// the active one. It cannot reach zero — an operation already in flight still
+// runs to its timeout, which is the separately parked mid-flight abort — but it
+// bounds how long after play begins a new one can start.
+func (a *App) nextPollInterval() time.Duration {
+	if gameActive(int(a.serverMode.Load())) || a.gameState.Load() == stateActive {
+		return a.cfg.PollInterval
+	}
+	if a.printServerBusy.Load() > 0 {
+		return a.cfg.PollInterval
+	}
+	return a.cfg.IdlePollInterval
 }
 
 // collect polls O-Zone and assembles a push payload.
@@ -535,6 +556,13 @@ func (a *App) drainPendingFetches() {
 	}
 	defer a.fetchBusy.Store(false)
 
+	// Print-server work in progress: poll at the in-game rate so a game starting
+	// mid-drain is seen within one fast tick instead of one idle tick. The
+	// bracket covers the WHOLE drain, gaps between games included, because it is
+	// exactly in one of those gaps that the next fetch is about to start.
+	a.printServerBusy.Add(1)
+	defer a.printServerBusy.Add(-1)
+
 	now := time.Now()
 	a.mu.Lock()
 	pending := make([]int, 0, len(a.pendingFetch))
@@ -664,6 +692,8 @@ func (s *resultsSession) connect() (*results.Client, error) {
 	// it before issuing a command, or the reply would be the handshake instead.
 	rc.Drain(s.app.cfg.ResultsHandshake, 5*time.Second)
 	s.conn = rc
+	// An open results connection is print-server work; see nextPollInterval.
+	s.app.printServerBusy.Add(1)
 	return rc, nil
 }
 
@@ -674,6 +704,7 @@ func (s *resultsSession) retire() {
 	}
 	s.conn.Close()
 	s.conn = nil
+	s.app.printServerBusy.Add(-1)
 }
 
 // acknowledge tells O-Zone the data was received (best-effort, only if the

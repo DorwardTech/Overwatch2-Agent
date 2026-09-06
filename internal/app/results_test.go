@@ -2,6 +2,7 @@ package app
 
 import (
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -304,5 +305,149 @@ func TestCheckGameResultsDrainsOffThePollGoroutine(t *testing.T) {
 	time.Sleep(time.Second)
 	if got := ps.Requests("all"); got != 1 {
 		t.Fatalf("print server received %d 'all' fetches after a game started, want exactly 1", got)
+	}
+}
+
+// The idle gate that every print-server operation re-checks is only ever as
+// current as the last poll, and collect() is the sole thing that refreshes it.
+// So while the agent is touching the print server it has to poll at the in-game
+// rate: the window in which a game can start unseen — and a NEW fetch be opened
+// during live play — is exactly the gap between polls.
+func TestPollCadenceRisesWhileTouchingThePrintServer(t *testing.T) {
+	a, ps := newSimApp(t)
+	a.cfg.PollInterval = 5 * time.Second
+	a.cfg.IdlePollInterval = 15 * time.Second
+
+	if got := a.nextPollInterval(); got != a.cfg.IdlePollInterval {
+		t.Fatalf("an idle agent polls every %s, want %s", got, a.cfg.IdlePollInterval)
+	}
+
+	ps.AddGame(9, ozonefix.AllResponseJSON())
+	a.queueFetch(9)
+
+	var once sync.Once
+	fetching := make(chan struct{})
+	release := make(chan struct{})
+	ps.OnRequest(func(cmd string) {
+		if cmd == "all" {
+			once.Do(func() { close(fetching) })
+			<-release
+		}
+	})
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		a.drainPendingFetches()
+	}()
+
+	select {
+	case <-fetching:
+	case <-time.After(2 * time.Second):
+		close(release)
+		t.Fatal("the drain never reached the print server")
+	}
+	if got := a.nextPollInterval(); got != a.cfg.PollInterval {
+		t.Errorf("polling every %s with a fetch in flight, want the in-game rate %s", got, a.cfg.PollInterval)
+	}
+	close(release)
+	<-done
+
+	if got := a.nextPollInterval(); got != a.cfg.IdlePollInterval {
+		t.Errorf("polling every %s once the drain is done, want the idle rate %s back", got, a.cfg.IdlePollInterval)
+	}
+}
+
+// The fast cadence is held on by a COUNT, so a path that took it and never gave
+// it back would leave the agent polling — and pushing — at the in-game rate for
+// the rest of its life. Every way out of a results session has to balance.
+func TestPrintServerBusyCountAlwaysReturnsToZero(t *testing.T) {
+	const oneValidGame = `{"gamelist":[{"gamenum":9,"gamename":"g9","duration":601,` +
+		`"starttime":"s","endtime":"e","playercount":2,"valid":1}]}`
+
+	t.Run("after a batch that runs to the end", func(t *testing.T) {
+		a, ps := newSimApp(t)
+		ps.AddGame(9, ozonefix.AllResponseJSON())
+		ps.SetList([]byte(oneValidGame))
+
+		a.syncGames(map[string]any{}, true)
+
+		if got := a.printServerBusy.Load(); got != 0 {
+			t.Errorf("printServerBusy = %d after a completed batch, want 0", got)
+		}
+	})
+
+	t.Run("after a batch that defers part-way", func(t *testing.T) {
+		a, ps := newSimApp(t)
+		ps.AddGame(9, ozonefix.AllResponseJSON())
+		ps.SetList([]byte(oneValidGame))
+		ps.OnRequest(func(cmd string) {
+			if cmd == "list" {
+				a.gameState.Store(stateActive) // a game starts before the first fetch
+			}
+		})
+
+		if status, _ := a.syncGames(map[string]any{}, true); status != "deferred" {
+			t.Fatalf("status = %q, want deferred", status)
+		}
+		if got := a.printServerBusy.Load(); got != 0 {
+			t.Errorf("printServerBusy = %d after a deferred batch, want 0", got)
+		}
+	})
+
+	t.Run("after a batch that never dials", func(t *testing.T) {
+		a, ps := newSimApp(t)
+		ps.SetList([]byte(oneValidGame))
+		a.serverModeAt.Store(time.Now().Add(-maxServerModeAge - time.Second).UnixNano())
+
+		if status, _ := a.syncGames(map[string]any{}, true); status != "deferred" {
+			t.Fatalf("status = %q, want deferred on a stale link", status)
+		}
+		if got := a.printServerBusy.Load(); got != 0 {
+			t.Errorf("printServerBusy = %d when the print server was never dialled, want 0", got)
+		}
+	})
+
+	t.Run("after a fetch that fails on the wire", func(t *testing.T) {
+		a, ps := newSimApp(t)
+		_ = ps.Close() // dial fails; connect must not have counted anything
+
+		if err := a.pullGameResults(9); err == nil {
+			t.Fatal("pullGameResults succeeded against a closed print server")
+		}
+		if got := a.printServerBusy.Load(); got != 0 {
+			t.Errorf("printServerBusy = %d after a failed dial, want 0", got)
+		}
+	})
+}
+
+// The count nests, and it has to: a drain brackets its whole run, and each
+// connection inside it brackets itself. Between one game and the next the
+// connection is closed while the drain is still going — and that is precisely
+// when the next fetch is about to be opened — so the cadence may only fall back
+// once EVERY holder has given the count back.
+//
+// This is a unit test of that rule rather than an end-to-end one: the gap it
+// describes is a few microseconds of bookkeeping between two fetches, too short
+// for any hook in the print-server simulator to observe.
+func TestPollCadenceNeedsEveryHolderToRelease(t *testing.T) {
+	a, _ := newSimApp(t)
+	a.cfg.PollInterval = 5 * time.Second
+	a.cfg.IdlePollInterval = 15 * time.Second
+
+	a.printServerBusy.Add(1) // the drain starts
+	a.printServerBusy.Add(1) // it opens a connection for the first game
+	if got := a.nextPollInterval(); got != a.cfg.PollInterval {
+		t.Fatalf("polling every %s during a drain, want %s", got, a.cfg.PollInterval)
+	}
+
+	a.printServerBusy.Add(-1) // that game is done and the connection closes
+	if got := a.nextPollInterval(); got != a.cfg.PollInterval {
+		t.Errorf("polling every %s between two games of a drain, want %s — the next fetch is about to open", got, a.cfg.PollInterval)
+	}
+
+	a.printServerBusy.Add(-1) // the drain finishes
+	if got := a.nextPollInterval(); got != a.cfg.IdlePollInterval {
+		t.Errorf("polling every %s with nothing touching the print server, want the idle rate %s", got, a.cfg.IdlePollInterval)
 	}
 }

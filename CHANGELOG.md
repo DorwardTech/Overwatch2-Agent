@@ -6,6 +6,34 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 The Site Agent and central Overwatch are versioned independently.
 
+## [1.5.1] — 2026-09-05
+
+### Fixed
+
+- **The agent no longer goes blind for fifteen seconds while it is touching the
+  print server.** The rule the whole results path is built around is that the
+  print server is never contacted during a game, and every operation re-checks
+  that immediately before it connects. But the check reads a value that only the
+  telemetry poll ever writes, so it can never be more current than the last poll
+  — and when the venue is idle the agent polls every fifteen seconds.
+
+  So a game starting just after an idle reading stayed invisible for up to that
+  long, and a results drain or a whole-venue backfill would keep opening NEW
+  fetches straight through the gap. 1.1.2 closed the version of this that could
+  last for an entire multi-game drain; what was left behind it was the gap
+  between two polls.
+
+  The agent now polls at the in-game rate for as long as it has print-server
+  work in progress. The blind spot shrinks from the idle interval to the active
+  one — fifteen seconds to five on the default settings. It cannot reach zero:
+  an operation already in flight still runs to its timeout, which is a separate
+  and known limitation. What this bounds is how long after play begins a NEW one
+  can start.
+
+  The cost is that the agent also pushes telemetry at the in-game rate for that
+  window. A results drain is seconds; a backfill is minutes, and an operator
+  asks for those one at a time.
+
 ## [1.5.0] — 2026-09-04
 
 ### Changed
