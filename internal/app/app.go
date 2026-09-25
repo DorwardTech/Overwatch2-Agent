@@ -92,6 +92,17 @@ const maxFailoverPushes = 4
 // before the next idle tick) and far below any real outage.
 const maxServerModeAge = 2 * time.Minute
 
+// deliverRetryInterval is how often deliverLoop re-attempts a drain that it has
+// no signal for.
+//
+// enqueue() signals on every batch, so in normal running this ticker only ever
+// fires on an empty buffer and costs one Peek. It earns its place when central
+// is unreachable AND polling has stopped — an O-Zone outage, say — where there
+// is no enqueue left to nudge it and the buffer would otherwise sit untouched
+// until the box came back. Short enough to recover promptly, long enough not to
+// hammer a central that is already struggling.
+const deliverRetryInterval = 3 * time.Second
+
 // maxBatchFetchErrors bounds how many CONNECTION failures in a row a batch
 // (backfill/resync or a cache refresh) will absorb before giving up: read
 // errors and desyncs, each of which now costs a reconnect on top of its
@@ -154,6 +165,9 @@ type App struct {
 	printServerBusy atomic.Int32         // depth of in-progress print-server work (see nextPollInterval)
 	failoverSem     chan struct{}        // bounds concurrent failover payload copies
 	stopRun         context.CancelFunc   // set by Run; requestShutdown cancels it (graceful reboot)
+	deliverSignal   chan struct{}        // nudges deliverLoop that the buffer has work
+	lastPushAt      atomic.Int64         // unix nanos of the last ENQUEUED telemetry batch
+	lastPushMode    atomic.Int32         // SERVERMODE carried by that batch (see pushDue)
 
 	store  *store.Store   // local verbatim game cache (nil if disabled/unavailable)
 	cache  *cache.Cache   // O-Zone-shaped view over the store
@@ -176,6 +190,11 @@ func New(cfg config.Config) *App {
 		pendingFetch: map[int]*pendingGame{},
 		givenUpFetch: map[int]bool{},
 		failoverSem:  make(chan struct{}, maxFailoverPushes),
+		// Depth 1 is deliberate: the signal means "there is work", not "there
+		// are N items". A send that finds the slot full has nothing to add,
+		// because the receiver has not run yet and will see the new entry when
+		// it does. That is what lets enqueue() be non-blocking.
+		deliverSignal: make(chan struct{}, 1),
 	}
 
 	// Restore telemetry spilled by the previous process (outage + restart).
@@ -336,6 +355,10 @@ func (a *App) Run(ctx context.Context) {
 		defer a.packir.Close()
 	}
 
+	// Started before the dial loop and outliving every reconnect: telemetry
+	// already buffered still deserves delivering while O-Zone is unreachable.
+	go a.deliverLoop(ctx)
+
 	backoff := time.Second
 	for ctx.Err() == nil {
 		client, err := ozone.Dial(a.cfg.OzoneHost, a.cfg.OzonePort)
@@ -379,7 +402,9 @@ func (a *App) pollLoop(ctx context.Context, client *ozone.Client) {
 			}
 		}
 		a.health.MarkPoll()
-		a.deliver(key, payload)
+		if a.pushDue(time.Now(), slow) {
+			a.enqueue(key, payload)
+		}
 		return true
 	}
 
@@ -414,13 +439,72 @@ func (a *App) pollLoop(ctx context.Context, client *ozone.Client) {
 // runs to its timeout, which is the separately parked mid-flight abort — but it
 // bounds how long after play begins a new one can start.
 func (a *App) nextPollInterval() time.Duration {
-	if gameActive(int(a.serverMode.Load())) || a.gameState.Load() == stateActive {
+	if a.inGame() {
 		return a.cfg.PollInterval
 	}
 	if a.printServerBusy.Load() > 0 {
 		return a.cfg.PollInterval
 	}
 	return a.cfg.IdlePollInterval
+}
+
+// inGame reports whether play is under way, by either signal.
+func (a *App) inGame() bool {
+	return gameActive(int(a.serverMode.Load())) || a.gameState.Load() == stateActive
+}
+
+// telemetryInterval is how often a SAMPLE should be recorded — which is not the
+// same question as how often to POLL.
+//
+// nextPollInterval deliberately runs at the fast rate whenever print-server
+// work is in flight, because collect() is the only thing that ever discovers a
+// game has started and that gate must stay current. That is a safety property
+// and it stays. But it used to drag telemetry along with it: at an idle venue,
+// one cache refresh per minute was enough to make a nominal 15s idle cadence
+// average about 7.9s, because every one of those safety polls also wrote a row.
+//
+// Separating the two means the agent can watch closely while recording at the
+// rate the venue actually asked for.
+func (a *App) telemetryInterval() time.Duration {
+	if a.inGame() {
+		return a.cfg.PollInterval
+	}
+	return a.cfg.IdlePollInterval
+}
+
+// pushDue reports whether this poll's payload should be recorded, and claims
+// the slot when it should.
+//
+// A SLOW poll always goes: it is the only payload carrying team info, the game
+// list, licences and the agent's own self-report, and dropping one would blind
+// central's agent-health view for a minute at a time. pollLoop is the only
+// caller, so the read-then-store needs no lock of its own.
+//
+// A CHANGE OF SERVER MODE always goes too, and without it the throttle eats the
+// most important sample there is. The end of a game is the moment the interval
+// widens — inGame() goes false, so telemetryInterval() jumps from the in-game
+// rate to the idle one — and the poll that DISCOVERS the game has ended is
+// therefore measured against the new, wider interval. A venue running 1s in
+// game and 30s idle would have that first post-game sample rejected for being
+// 1s after the last one, leaving central showing a game still in progress for
+// up to another 30 seconds. Nothing else would carry it: a mode change does not
+// enqueue anything of its own, and deliverLoop only drains what enqueue
+// accepted.
+//
+// The throttle is meant to skip samples that say the same thing as the last
+// one. A sample that reports a different mode is the opposite of that.
+func (a *App) pushDue(now time.Time, slow bool) bool {
+	mode := a.serverMode.Load()
+
+	if !slow && mode == a.lastPushMode.Load() {
+		if last := a.lastPushAt.Load(); last != 0 && now.Sub(time.Unix(0, last)) < a.telemetryInterval() {
+			return false
+		}
+	}
+	a.lastPushAt.Store(now.UnixNano())
+	a.lastPushMode.Store(mode)
+
+	return true
 }
 
 // collect polls O-Zone and assembles a push payload.
@@ -479,10 +563,62 @@ func (a *App) collect(client *ozone.Client, slow bool) ([]byte, string, error) {
 	return data, strconv.FormatInt(a.seq, 10), err
 }
 
-// deliver queues the batch then drains the buffer oldest-first.
-func (a *App) deliver(key string, payload []byte) {
+// enqueue hands a batch to the delivery goroutine and returns immediately.
+//
+// THIS IS THE WHOLE POINT OF THE SPLIT. pollLoop used to call deliver(), which
+// blocks on an HTTPS round trip to central over the public internet, and only
+// once it returned did the loop reset its timer — so the real sampling period
+// was `interval + O-Zone round trips + central's latency`, never the interval
+// alone. At a venue configured for a 1s in-game rate that produced ~2.4s, and
+// no setting could fix it: the push was on the critical path.
+//
+// Now the poll loop's only obligation is to read O-Zone and hand the bytes
+// over. Central being slow, or down, no longer stretches the sampling clock.
+func (a *App) enqueue(key string, payload []byte) {
 	a.buf.Push(key, payload)
 
+	select {
+	case a.deliverSignal <- struct{}{}:
+	default: // already signalled and not yet serviced; the drain will see this entry
+	}
+}
+
+// deliverLoop owns every push to central for the life of the process.
+//
+// It outlives an O-Zone reconnect on purpose: buffered telemetry is still worth
+// delivering while the agent is failing to reach the box, and tying the drain
+// to pollLoop would have stalled it exactly when the buffer matters most.
+//
+// The ticker is a backstop rather than the mechanism — enqueue signals on every
+// batch — but it is what retries a failed push when polling has stopped, and a
+// drain on an empty buffer costs one mutexed Peek.
+func (a *App) deliverLoop(ctx context.Context) {
+	tick := time.NewTicker(deliverRetryInterval)
+	defer tick.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-a.deliverSignal:
+		case <-tick.C:
+		}
+		a.drainBuffer()
+	}
+}
+
+// deliver queues the batch then drains the buffer oldest-first, synchronously.
+//
+// Retained as the single-shot form the tests drive directly; the running agent
+// goes through enqueue() + deliverLoop() instead.
+func (a *App) deliver(key string, payload []byte) {
+	a.buf.Push(key, payload)
+	a.drainBuffer()
+}
+
+// drainBuffer pushes queued batches oldest-first until the queue empties or
+// central stops accepting them.
+func (a *App) drainBuffer() {
 	for {
 		entry, ok := a.buf.Peek()
 		if !ok {
@@ -490,7 +626,13 @@ func (a *App) deliver(key string, payload []byte) {
 		}
 		err := a.pusher.Push(entry.Data, entry.Key)
 		if err == nil {
-			a.buf.PopFront()
+			// PopSent, not PopFront: this drain runs on deliverLoop's
+			// goroutine while pollLoop keeps enqueuing, so the bounded queue
+			// can evict THIS entry during the round trip above. Popping the
+			// head unconditionally would then discard whatever replaced it,
+			// which has not been sent. A false return means capacity already
+			// removed it, so there is nothing to do but carry on.
+			a.buf.PopSent(entry)
 			a.health.MarkPush()
 			continue
 		}
@@ -502,7 +644,7 @@ func (a *App) deliver(key string, payload []byte) {
 			// keep the fresher telemetry flowing.
 			log.Printf("[agent] push rejected permanently — dropping batch %s: %v (buffered=%d)",
 				entry.Key, err, a.buf.Len())
-			a.buf.PopFront()
+			a.buf.PopSent(entry)
 			continue
 		}
 		log.Printf("[agent] push failed: %v (buffered=%d)", err, a.buf.Len())
