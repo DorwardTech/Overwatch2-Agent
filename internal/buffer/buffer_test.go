@@ -170,3 +170,90 @@ func TestLoadAppliesTheByteBudget(t *testing.T) {
 		t.Fatalf("restored %d bytes, want at most %d", got, b.maxBytes)
 	}
 }
+
+// The gap between Peek and the pop is where a batch goes missing.
+//
+// A caller peeks the head, spends a network round trip sending it, then pops
+// it. The queue is bounded and drops oldest-first, so a Push during that round
+// trip can evict the entry being sent — and an unconditional pop then removes
+// whatever took its place, which was never sent. PopSent refuses, so the
+// replacement stays queued for its own turn.
+func TestPopSentLeavesAHeadItDidNotSendAlone(t *testing.T) {
+	b := New(2)
+	b.Push("a", []byte("1"))
+
+	sent, ok := b.Peek()
+	if !ok {
+		t.Fatal("Peek found nothing to send")
+	}
+
+	// The round trip is in flight; two more polls arrive and capacity evicts
+	// the entry being sent.
+	b.Push("b", []byte("2"))
+	b.Push("c", []byte("3"))
+
+	if b.PopSent(sent) {
+		t.Fatal("PopSent removed a head that was not the entry it was given")
+	}
+
+	head, _ := b.Peek()
+	if head.Key != "b" {
+		t.Fatalf("head = %q, want the unsent entry b still queued", head.Key)
+	}
+	if b.Len() != 2 {
+		t.Fatalf("Len = %d, want both unsent entries kept", b.Len())
+	}
+}
+
+// The ordinary path still has to work, byte budget included.
+func TestPopSentRemovesTheEntryItWasGiven(t *testing.T) {
+	b := New(10)
+	b.Push("a", make([]byte, 100))
+	b.Push("b", make([]byte, 250))
+
+	sent, _ := b.Peek()
+	if !b.PopSent(sent) {
+		t.Fatal("PopSent refused the entry it had just been handed")
+	}
+
+	if got := b.Bytes(); got != 250 {
+		t.Fatalf("Bytes = %d after popping a 100-byte entry, want 250", got)
+	}
+	head, _ := b.Peek()
+	if head.Key != "b" {
+		t.Fatalf("head = %q, want b", head.Key)
+	}
+}
+
+// Entry.id does not survive the spill file, so restored entries come back at
+// the zero value. If they kept it, PopSent's equality check would match an
+// entry nobody sent — the exact bug it exists to prevent, reintroduced by a
+// restart.
+func TestPopSentStillDiscriminatesAfterALoad(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "spill.json")
+
+	src := New(10)
+	src.Push("a", []byte("1"))
+	src.Push("b", []byte("2"))
+	if err := src.Save(path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	b := New(10)
+	if _, err := b.Load(path); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	sent, _ := b.Peek()
+	// A zero-value Entry must never match a restored head.
+	if b.PopSent(Entry{}) {
+		t.Fatal("PopSent matched a zero-value entry against a restored head")
+	}
+	if !b.PopSent(sent) {
+		t.Fatal("PopSent refused the restored head it had just been handed")
+	}
+	if b.Len() != 1 {
+		t.Fatalf("Len = %d, want the second restored entry still queued", b.Len())
+	}
+}

@@ -6,6 +6,88 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 The Site Agent and central Overwatch are versioned independently.
 
+## [1.6.2] — 2026-09-25
+
+### Fixed
+
+- **The sample that reports a game has ended could be thrown away.** The end of
+  a game is the exact moment the recording interval widens, because the agent is
+  no longer in play — so the poll that *discovers* the game has ended was
+  measured against the new, wider idle interval and rejected for arriving too
+  soon after the last one. At a venue recording every second in play and every
+  thirty seconds idle, the state change could sit undelivered for most of a
+  minute, and central would go on showing a game still in progress. Nothing else
+  would have carried it: a change of state does not queue anything of its own.
+
+  A poll that reports a different server state is now always recorded. The
+  throttle exists to skip samples that say the same thing as the one before;
+  this one says something new by definition. The exemption is one-shot, so the
+  idle rate resumes immediately afterwards.
+
+## [1.6.1] — 2026-09-25
+
+### Fixed
+
+- **A queued batch could be discarded without ever being sent.** Delivery moved
+  onto its own goroutine in 1.6.0, which is what took the push off the polling
+  clock — but it also meant a batch could now be queued *while* another was in
+  flight. The send buffer is bounded and drops oldest-first, so the batch being
+  sent is exactly the one capacity evicts; the drain then removed the batch that
+  had taken its place at the head, which had not been sent. Nothing logged it
+  and nothing retried it: the telemetry was simply gone, and only while the
+  buffer was full enough to be evicting — that is, during an outage, when the
+  queued data is the only record of what happened.
+
+  The drain now removes a batch only if it is still the one it sent. While
+  delivery ran on the polling goroutine this could not happen, so the window
+  opened and closed inside 1.6.0 and no released build is affected.
+
+## [1.6.0] — 2026-09-25
+
+The venue asked for one-second telemetry during a game. The agent had been
+configured for it for months and was delivering 2.4 seconds, and no setting
+could have fixed that — the push was on the critical path.
+
+### Fixed
+
+- **The push no longer blocks the next poll.** `pollLoop` reset its timer only
+  *after* `deliver()` returned, and `deliver()` blocks on an HTTPS round trip to
+  central over the public internet. The real sampling period was therefore
+  `interval + game-server round trips + central's latency`, never the interval alone.
+  At Laserzone Sunshine Coast, configured at 1s, that measured **2.4s** in
+  production — and central's response time, not the config, was setting the
+  in-game rate.
+
+  Batches now go to a delivery goroutine that owns every push for the life of the
+  process. The poll loop's only job is to read the game server and hand the bytes over.
+
+  The goroutine starts before the dial loop and outlives every reconnect, which
+  is a fix in its own right: the drain used to be reachable only from `pollLoop`,
+  so buffered telemetry sat undelivered while the agent was failing to reach the
+  box — exactly when the buffer matters most.
+
+- **Idle telemetry is no longer dragged to the fast rate by print-server work.**
+  `nextPollInterval()` returns the fast interval whenever `printServerBusy > 0`,
+  because `collect()` is the only thing that ever discovers a game has started
+  and that gate must stay current. That is a safety property and it stays — but
+  it was pulling telemetry along with it. One cache refresh a minute was enough
+  to make a nominal 15s idle cadence average **7.9s** in production, because
+  every one of those safety polls also wrote a row.
+
+  `telemetryInterval()` now separates *how often to look* from *how often to
+  record*, so the agent can watch closely while sampling at the rate the venue
+  asked for.
+
+  A **slow** poll is never throttled: it is the only payload carrying team info,
+  the game list, licences and the agent's own self-report, and dropping one would
+  blind central's agent-health view for a minute at a time.
+
+### Notes
+
+- `IDLE_POLL_INTERVAL` at or above 30s crosses central's default `Agent offline`
+  threshold, and `config.go` warns about it at startup. Raise that alert rule
+  **before** raising the interval, or the site flaps offline in between.
+
 ## [1.5.1] — 2026-09-05
 
 ### Fixed

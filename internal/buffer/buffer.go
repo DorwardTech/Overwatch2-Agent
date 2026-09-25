@@ -24,6 +24,14 @@ import (
 type Entry struct {
 	Key  string
 	Data []byte
+
+	// id is process-local identity, assigned by Push and deliberately
+	// unexported so it stays out of the spill file's JSON — it identifies a
+	// slot in this queue, not the batch, and means nothing across a restart.
+	// PopSent uses it to prove the head is still the entry that was handed out
+	// by Peek. Load assigns ids to restored entries so none is ever left at
+	// the zero value, which therefore cannot match anything in the queue.
+	id uint64
 }
 
 // MaxBytes caps the total payload the queue will hold, whatever the entry
@@ -34,9 +42,10 @@ const MaxBytes = 32 << 20
 type Buffer struct {
 	mu       sync.Mutex
 	items    []Entry
-	bytes    int // total len(Data) currently queued
-	max      int // entry-count bound
-	maxBytes int // payload-size bound
+	bytes    int    // total len(Data) currently queued
+	max      int    // entry-count bound
+	maxBytes int    // payload-size bound
+	nextID   uint64 // monotonic source of Entry.id
 }
 
 func New(max int) *Buffer {
@@ -54,7 +63,8 @@ func (b *Buffer) Push(key string, data []byte) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	b.items = append(b.items, Entry{Key: key, Data: data})
+	b.nextID++
+	b.items = append(b.items, Entry{Key: key, Data: data, id: b.nextID})
 	b.bytes += len(data)
 	b.trimLocked()
 }
@@ -75,6 +85,34 @@ func (b *Buffer) Peek() (Entry, bool) {
 		return Entry{}, false
 	}
 	return b.items[0], true
+}
+
+// PopSent removes the head only if it is still the entry Peek handed out, and
+// reports whether it did.
+//
+// This is the whole gap between Peek and the pop. A caller peeks the head,
+// spends an HTTPS round trip sending it, and pops it on success — but the
+// queue is bounded and drops OLDEST-first, so a Push arriving during that
+// round trip can evict the very entry being sent. An unconditional PopFront
+// then removes whatever took its place, which has NOT been sent: a batch of
+// telemetry lost silently, and lost precisely when the buffer is under enough
+// pressure to be evicting, which is when it matters most.
+//
+// Returning false is not an error. It means the entry was already dropped by
+// capacity, so there is nothing left to remove and the caller should simply
+// carry on to the new head.
+func (b *Buffer) PopSent(sent Entry) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if len(b.items) == 0 || b.items[0].id != sent.id {
+		return false
+	}
+
+	b.bytes -= len(b.items[0].Data)
+	b.items = b.items[1:]
+
+	return true
 }
 
 // PopFront removes the oldest entry (after a successful send).
@@ -150,6 +188,18 @@ func (b *Buffer) Load(path string) (int, error) {
 
 	b.mu.Lock()
 	queued := len(b.items)
+
+	// Entry.id does not survive JSON, so restored entries arrive at the zero
+	// value. Give them fresh ids before they join the queue: PopSent compares
+	// on id, and a queue full of zeroes would let it pop an entry that was
+	// never sent. Only the restored slice is numbered — renumbering entries
+	// already queued would invalidate an id a concurrent drain is holding, and
+	// the resulting PopSent miss would re-send a batch rather than drop one.
+	for i := range items {
+		b.nextID++
+		items[i].id = b.nextID
+	}
+
 	b.items = append(items, b.items...)
 	b.bytes = 0
 	for _, e := range b.items {
