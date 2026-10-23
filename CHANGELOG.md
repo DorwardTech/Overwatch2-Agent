@@ -6,6 +6,32 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 The Site Agent and central Overwatch are versioned independently.
 
+## [1.6.3] — 2026-10-23
+
+Rebuilt with Go 1.26.10 for security fixes in Go's standard library. Nothing in
+the agent's own code changes. Docker venues pull the 1.6.3 image; Windows venues
+run the 1.6.3 installer.
+
+### Security
+
+- **Built with Go 1.26.10.** Go 1.25, which built 1.6.2, is no longer
+  supported, and its last release (1.25.14) has twelve standard-library
+  vulnerabilities that the agent's code reaches: in the HTTP client and server
+  (GO-2026-6603, 6605, 6610, 6611, 6612, 6613, 6617), `net/textproto`
+  (GO-2026-6608), TLS (GO-2026-6607), certificate verification (GO-2026-6809)
+  and the setup page's HTML templates (GO-2026-6599, 6600). All are fixed in
+  1.26.10. The Windows build still runs on Windows 10 / Server 2016 or later.
+- `filippo.io/edwards25519` 1.1.1 (GO-2026-4503; the agent never called the
+  affected code).
+
+### Changed
+
+- The agent now builds with Go 1.26's defaults. The ones that could show are
+  the setup page rejecting a host with a stray colon outside brackets (such an
+  address could never be reached anyway), TLS offering additional post-quantum
+  key exchange groups, and Go 1.26's new garbage collector. Building from source
+  needs Go 1.26 or later.
+
 ## [1.6.2] — 2026-09-25
 
 ### Fixed

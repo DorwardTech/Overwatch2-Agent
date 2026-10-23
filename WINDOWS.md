@@ -36,7 +36,7 @@ PC itself is the usual choice; the one thing to know about that is under
    > release before running it:
    >
    > ```powershell
-   > Get-FileHash .\overwatch-agent_1.5.0_windows_setup.exe -Algorithm SHA256
+   > Get-FileHash .\overwatch-agent_1.6.3_windows_setup.exe -Algorithm SHA256
    > ```
 
    The installer copies the agent to `C:\Program Files\Overwatch Agent\` and
@@ -95,7 +95,7 @@ the identical agent:
    check it against `SHA256SUMS.txt` from the same release:
 
    ```powershell
-   Get-FileHash .\overwatch-agent_1.5.0_windows_amd64.zip -Algorithm SHA256
+   Get-FileHash .\overwatch-agent_1.6.3_windows_amd64.zip -Algorithm SHA256
    ```
 
 2. **Extract** it to `C:\Program Files\Overwatch Agent\`. Keep the executable
@@ -120,7 +120,7 @@ The installer itself takes the usual Inno Setup switches, so a scripted rollout
 can run it unattended:
 
 ```powershell
-.\overwatch-agent_1.5.0_windows_setup.exe /VERYSILENT /NORESTART
+.\overwatch-agent_1.6.3_windows_setup.exe /VERYSILENT /NORESTART
 ```
 
 A silent install registers and configures the service but does not open the
@@ -391,7 +391,7 @@ a terminal.
 
 ## Building from source
 
-Any platform with Go 1.25+ can build the Windows executable:
+Any platform with Go 1.26+ can build the Windows executable:
 
 ```bash
 GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath \

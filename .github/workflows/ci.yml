@@ -14,7 +14,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.25'
+          go-version: '1.26.10'
           check-latest: true
 
       # The agent enforces the never-touch-the-print-server-during-a-game
@@ -57,7 +57,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.25'
+          go-version: '1.26.10'
           check-latest: true
 
       - name: Stage a payload
@@ -95,7 +95,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.25'
+          go-version: '1.26.10'
           check-latest: true
 
       - name: govulncheck

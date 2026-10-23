@@ -4,11 +4,11 @@
 # cross-compile to the buildx target arch (TARGETARCH/TARGETVARIANT), so
 # amd64/arm64/armv7 all build without QEMU — matches docker-image.yml, which
 # sets up buildx only (no setup-qemu).
-FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS build
+FROM --platform=$BUILDPLATFORM golang:1.26.10-alpine AS build
 # Default to the current release so an un-tagged build (e.g. main -> :latest)
 # still reports a real version, not "dev". Tagged releases override this via a
 # build-arg (see docker-image.yml). Keep in sync with internal/version.Value.
-ARG AGENT_VERSION=1.6.2
+ARG AGENT_VERSION=1.6.3
 ARG TARGETOS TARGETARCH TARGETVARIANT
 WORKDIR /src
 COPY go.mod go.sum ./

@@ -17,7 +17,7 @@ By participating, you agree to abide by our [Code of Conduct](CODE_OF_CONDUCT.md
 
 ## Development setup
 
-You need **Go 1.25+**.
+You need **Go 1.26+**.
 
 ```bash
 git clone https://github.com/DorwardTech/Overwatch2-Agent.git

@@ -122,7 +122,7 @@ docker compose exec agent /agent healthcheck
 ## Build from source
 
 ```bash
-go build -o overwatch-agent ./cmd/agent                               # needs Go 1.25+
+go build -o overwatch-agent ./cmd/agent                               # needs Go 1.26+
 GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o overwatch-agent.exe ./cmd/agent   # Windows
 ```
 
