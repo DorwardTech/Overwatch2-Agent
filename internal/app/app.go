@@ -24,6 +24,7 @@ import (
 	"overwatch/agent/internal/msgbus"
 	"overwatch/agent/internal/ozone"
 	"overwatch/agent/internal/packir"
+	"overwatch/agent/internal/platform"
 	"overwatch/agent/internal/proxy"
 	"overwatch/agent/internal/push"
 	"overwatch/agent/internal/results"
@@ -49,6 +50,16 @@ var errGameActive = errors.New("game in progress: print server off-limits")
 // is a distinct error so an operator is never told "game in progress" when the
 // truth is that the agent lost contact with O-Zone.
 var errLinkStale = errors.New("O-Zone link stale: server state unknown")
+
+// errPollUnsettled is returned when a print-server operation is refused because
+// the last poll could not confirm that the server state it read was current:
+// the poll failed, a frame that could have been the server state turned up
+// beside the reply it took, a frame was lost unseen, or a game had started
+// (the message bus said so, or a server state said a game was on) since the
+// poll before it began (see collect). Like errLinkStale it means "not now";
+// the next clean poll settles it. A game in progress is reported as
+// errGameActive instead, so operators are told that.
+var errPollUnsettled = errors.New("O-Zone server state unconfirmed: waiting for a clean poll after a failed or out-of-step poll or a game start")
 
 // errFrameMismatch is returned when a results reply identifies itself as a
 // different game than the one requested — the signature of a desynchronised
@@ -79,8 +90,9 @@ const unknownServerMode = -1
 const maxFailoverPushes = 4
 
 // maxServerModeAge bounds how old a SERVERMODE reading may be and still be
-// trusted to gate print-server access. collect() is the sole writer, so the
-// reading only refreshes while the O-Zone WebSocket poll loop is running; when
+// trusted to gate print-server access. Only the O-Zone WebSocket link writes it
+// (collect, and observeFrame on that link's reader), so the reading only
+// refreshes while the poll loop's connection is up; when
 // that link drops, Run reconnects with a backoff capped at 30s and keeps trying
 // for as long as the outage lasts. Without an age bound the last reading stands
 // forever, and paths that do not depend on the poll loop — an operator pressing
@@ -128,6 +140,7 @@ const (
 type pendingGame struct {
 	attempts  int
 	nextRetry time.Time // zero = due immediately
+	notBefore time.Time // not fetched or cached before this (see App.notBefore)
 }
 
 // fetchBackoff returns the wait before retry number attempts+1.
@@ -143,17 +156,35 @@ func fetchBackoff(attempts int) time.Duration {
 }
 
 type App struct {
-	cfg             config.Config
-	pusher          *push.Pusher
-	buf             *buffer.Buffer
-	health          *health.Health
-	seq             int64
-	startedAt       time.Time
-	lastGameNum     int
-	lastBusGame     int          // game number from the most recent GAME_START bus event
-	serverMode      atomic.Int32 // latest O-Zone SERVERMODE
-	serverModeAt    atomic.Int64 // unix nanos when serverMode was last read (0 = never)
-	gameState       atomic.Int32 // idle/active/finishing (Message Bus driven)
+	cfg          config.Config
+	pusher       *push.Pusher
+	buf          *buffer.Buffer
+	health       *health.Health
+	seq          int64
+	startedAt    time.Time
+	lastGameNum  int
+	lastBusGame  int          // game number from the most recent GAME_START bus event
+	serverMode   atomic.Int32 // latest O-Zone SERVERMODE
+	serverModeAt atomic.Int64 // unix nanos when serverMode was last read (0 = never)
+	gameState    atomic.Int32 // idle/active/finishing (Message Bus driven)
+	// pollUnsettled is set when the last poll failed, could not be sure the
+	// server state it took was its own, or followed a sign that a game had
+	// started (see collect): its reading may not be current, so it may not
+	// clear an active game or open the print-server gate.
+	pollUnsettled atomic.Bool
+	// finishPending is set when a finished game's follow-up work (the fetches
+	// it queued and a cache refresh) found the print server off-limits; the
+	// next poll that finds it open runs that work (see finishWork).
+	finishPending atomic.Bool
+	// stateMu orders a poll's verdict against signs that a game has started,
+	// and guards startSignals, the count of those signs (a GAME_START from the
+	// bus, or a server state saying a game is on, seen as it arrived; see
+	// observeFrame), and prevStarts, that count when the last completed poll
+	// began. A poll with a sign since the poll before it began may not clear a
+	// game on an idle reading (see collect).
+	stateMu         sync.Mutex
+	startSignals    int64
+	prevStarts      int64
 	fetchedGames    map[int]bool
 	pendingFetch    map[int]*pendingGame // finished games awaiting a safe (non-game) window
 	givenUpFetch    map[int]bool         // games abandoned after maxFetchAttempts
@@ -195,6 +226,13 @@ func New(cfg config.Config) *App {
 		// because the receiver has not run yet and will see the new entry when
 		// it does. That is what lets enqueue() be non-blocking.
 		deliverSignal: make(chan struct{}, 1),
+	}
+
+	// A volume mounted where the image keeps its state, that the agent cannot
+	// write to: say so, since the cache and the spill files then fall back to
+	// places a redeploy wipes (platform.StateDir).
+	if p := platform.StateDirProblem(); p != "" {
+		log.Printf("[agent] %s", p)
 	}
 
 	// Restore telemetry spilled by the previous process (outage + restart).
@@ -385,6 +423,7 @@ func (a *App) pollLoop(ctx context.Context, client *ozone.Client) {
 	defer timer.Stop()
 
 	var lastSlow time.Time
+	var reportedForeign, reportedStale, reportedOverflow int64
 	poll := func() bool {
 		slow := time.Since(lastSlow) >= a.cfg.SlowPollInterval
 		payload, key, err := a.collect(client, slow)
@@ -394,6 +433,14 @@ func (a *App) pollLoop(ctx context.Context, client *ozone.Client) {
 		}
 		if slow {
 			lastSlow = time.Now()
+			// Once a slow poll, not per frame: a busy O-Zone can produce them
+			// every second.
+			foreign, stale, overflow := client.ForeignFrames(), client.StaleFrames(), client.OverflowFrames()
+			if foreign > reportedForeign || stale > reportedStale || overflow > reportedOverflow {
+				log.Printf("[agent] O-Zone: discarded %d frame(s) that answered another command and %d that arrived between requests; dropped %d with the queue full",
+					foreign-reportedForeign, stale-reportedStale, overflow-reportedOverflow)
+				reportedForeign, reportedStale, reportedOverflow = foreign, stale, overflow
+			}
 			if a.cfg.CommandsEnabled {
 				go a.processCommands()
 			}
@@ -440,6 +487,15 @@ func (a *App) pollLoop(ctx context.Context, client *ozone.Client) {
 // bounds how long after play begins a new one can start.
 func (a *App) nextPollInterval() time.Duration {
 	if a.inGame() {
+		return a.cfg.PollInterval
+	}
+	// An unsettled poll that read idle holds the print server off until a
+	// clean one follows; that one should come at the fast rate, not the idle
+	// one. After every game the first idle poll is unsettled (a game start
+	// holds for two polls), and a finished game's fetches wait on the poll
+	// after it. A reading that is not idle (O-Zone starting up or shutting
+	// down) cannot be settled by polling sooner.
+	if a.pollUnsettled.Load() && printServerSafe(int(a.serverMode.Load())) {
 		return a.cfg.PollInterval
 	}
 	if a.printServerBusy.Load() > 0 {
@@ -509,19 +565,91 @@ func (a *App) pushDue(now time.Time, slow bool) bool {
 
 // collect polls O-Zone and assembles a push payload.
 func (a *App) collect(client *ozone.Client, slow bool) ([]byte, string, error) {
+	// Every frame is looked at as it arrives, not only those this poll's
+	// calls take (see observeFrame).
+	client.Observe(a.observeFrame)
+	// What came in before this poll asked says nothing about it.
+	client.Flush()
+	a.stateMu.Lock()
+	starts := a.startSignals
+	a.stateMu.Unlock()
+
+	// The gate keeps the last poll's verdict while this one runs, so a clean
+	// poll does not close it under work already passed through it. A poll that
+	// fails part-way closes it; a call fails within replyTimeout.
 	server, err := client.Command("GETSERVERSTATE")
 	if err != nil {
+		a.pollUnsettled.Store(true)
 		return nil, "", err
 	}
 	mode := toInt(server["SERVERMODE"])
-	a.noteServerMode(mode)
-	a.reconcileState(mode)
-	if a.cfg.ResultsEnabled {
-		a.checkGameResults(server)
+	// A reading that closes the gate needs no confirming: act on it now, so a
+	// slow or failed GETACTIVEPACKS cannot leave the gate open behind it.
+	if !printServerSafe(mode) {
+		a.noteServerMode(mode)
+		a.reconcileState(mode)
 	}
+	// Frames kept so far came before this poll's request or answer other
+	// commands. Those lost unseen still count: one may have been the reply.
+	client.DropDiscarded()
+
 	packs, err := client.Command("GETACTIVEPACKS")
 	if err != nil {
+		a.pollUnsettled.Store(true)
 		return nil, "", err
+	}
+
+	// Only now, with both replies in, may a reading open the gate or clear a
+	// game. A frame dropped meanwhile that could be the server state (one
+	// echoing GETSERVERSTATE, or one with no echo but a SERVERMODE) means the
+	// reply taken may not be this poll's: the real one may be that frame. If
+	// one of them reads otherwise than idle, it wins and the poll stays
+	// unsettled; if they all read idle, the verdict is the same whichever was
+	// this poll's, and the poll settles. Frames echoing another command are
+	// other clients' traffic or leftovers, and cannot be the server state.
+	//
+	// GETACTIVEPACKS's own reply is judged with them. A reply without an echo
+	// is accepted by any command, so the real server state, sent with none,
+	// could be the frame GETACTIVEPACKS took. A frame dropped unseen (lost)
+	// could have been anything, so the poll does not settle.
+	extras, lost := client.TakeDiscarded()
+	settled := lost == 0 && printServerSafe(mode)
+	for _, f := range append(extras, packs) {
+		if !mayBeServerState(f) {
+			continue
+		}
+		m := toInt(f["SERVERMODE"])
+		if !printServerSafe(m) {
+			settled = false
+			if !gameActive(mode) {
+				mode = m
+			}
+		}
+	}
+	// A sign that a game has started (a GAME_START from the bus, or a server
+	// state saying a game is on, seen as it arrived) since the previous poll
+	// began means this poll's idle reading may predate the start: it may not
+	// clear the game. Since the previous poll, not this one: the frame this
+	// poll took can be another client's reading from before the start, and
+	// that client's packs reply can end this poll ahead of its own server
+	// state, which then turns up only after the verdict. Held under stateMu, so
+	// a sign is either seen here or lands after the reconcile below.
+	a.stateMu.Lock()
+	if a.startSignals != a.prevStarts {
+		settled = false
+	}
+	a.prevStarts = starts
+	a.pollUnsettled.Store(!settled)
+	a.noteServerMode(mode)
+	a.reconcileState(mode)
+	a.stateMu.Unlock()
+	// A finished game's follow-up work that found the print server off-limits
+	// runs now, off this goroutine, if the gate has opened.
+	if a.finishPending.Load() && a.printServerGate() == nil {
+		go a.finishWork()
+	}
+	if a.cfg.ResultsEnabled {
+		a.checkGameResults(server)
 	}
 
 	a.seq++
@@ -533,17 +661,26 @@ func (a *App) collect(client *ozone.Client, slow bool) ([]byte, string, error) {
 	}
 
 	if slow {
-		if t, err := client.Command("GETTEAMINFO"); err == nil {
-			payload["team_info"] = t["TEAMS"]
-		}
-		if g, err := client.Command("GETGAMELIST"); err == nil {
-			payload["game_list"] = g["GAMES"]
-		}
-		if l, err := client.Command("GETFEATURELICINFO"); err == nil {
-			// Forward the full feature-licence response (feature flags +
-			// TIMEDLICS), so the Agent Log shows everything and central can
-			// extract the timed licences for expiry tracking.
-			payload["licence_info"] = l
+		// The first of these to fail ends the round. Each waits up to
+		// replyTimeout, and all the while nothing reads the server state, so
+		// the gate stands on this poll's verdict: one unanswered command must
+		// not leave it there for three timeouts.
+		for _, cmd := range []string{"GETTEAMINFO", "GETGAMELIST", "GETFEATURELICINFO"} {
+			r, err := client.Command(cmd)
+			if err != nil {
+				break
+			}
+			switch cmd {
+			case "GETTEAMINFO":
+				payload["team_info"] = r["TEAMS"]
+			case "GETGAMELIST":
+				payload["game_list"] = r["GAMES"]
+			default:
+				// Forward the full feature-licence response (feature flags +
+				// TIMEDLICS), so the Agent Log shows everything and central
+				// can extract the timed licences for expiry tracking.
+				payload["licence_info"] = r
+			}
 		}
 		// Agent self-report: version + health, so central can surface it.
 		pending, givenUp := a.resultsBacklog()
@@ -676,12 +813,13 @@ func (a *App) checkGameResults(server map[string]any) {
 	}
 
 	// Only ever touch the print server when it's safe to do so, and run the
-	// drain OFF this goroutine. collect() is the sole writer of serverMode (and,
-	// without the Message Bus, of gameState), so blocking it inside a drain
-	// would freeze the very idle signal every fetch re-checks: a game starting
-	// mid-drain would go unnoticed and the next queued game would be pulled from
-	// the print server during live play. Keeping the poll loop free also stops a
-	// slow drain from stalling telemetry past central's offline window.
+	// drain OFF this goroutine. collect() is the only writer of an idle
+	// serverMode (observeFrame records only readings that close the gate), so
+	// blocking it inside a drain would freeze the very idle signal every fetch
+	// re-checks: without the Message Bus, a game starting mid-drain would go
+	// unnoticed and the next queued game would be pulled from the print server
+	// during live play. Keeping the poll loop free also stops a slow drain from
+	// stalling telemetry past central's offline window.
 	if a.safeForPrintServer(mode) {
 		go a.drainPendingFetches()
 	}
@@ -692,9 +830,13 @@ func (a *App) checkGameResults(server map[string]any) {
 // and never on the poll goroutine (see checkGameResults). Single-flighted, so
 // repeated polls during a long drain can't pile up goroutines; a game queued
 // after the run started is picked up by the next drain.
-func (a *App) drainPendingFetches() {
+//
+// It reports whether it left a due game untried for want of a safe moment (the
+// gate, the results lock, or a drain already running), so a caller that must
+// see the work done can try again later; see finishWork.
+func (a *App) drainPendingFetches() (deferred bool) {
 	if !a.fetchBusy.CompareAndSwap(false, true) {
-		return // a drain is already in progress
+		return true // a drain is already in progress
 	}
 	defer a.fetchBusy.Store(false)
 
@@ -709,8 +851,8 @@ func (a *App) drainPendingFetches() {
 	a.mu.Lock()
 	pending := make([]int, 0, len(a.pendingFetch))
 	for n, p := range a.pendingFetch {
-		if now.Before(p.nextRetry) {
-			continue // backing off; not due yet
+		if now.Before(p.nextRetry) || now.Before(p.notBefore) {
+			continue // backing off, or inside the finish delay; not due yet
 		}
 		pending = append(pending, n)
 	}
@@ -722,33 +864,38 @@ func (a *App) drainPendingFetches() {
 			a.clearPending(n)
 			continue
 		}
-		a.fetchGameResults(n)
+		if a.fetchGameResults(n) {
+			deferred = true
+		}
 	}
+	return deferred
 }
 
 // fetchGameResults handles the automatic finish path. It refuses to run during
 // active play, and yields (TryLock) if a command-driven sync is using the
 // results API — retrying on a later poll. Genuine fetch failures back off
-// per-game and give up after maxFetchAttempts.
-func (a *App) fetchGameResults(gameNumber int) {
+// per-game and give up after maxFetchAttempts. It reports whether it put the
+// game off for want of a safe moment, without trying it.
+func (a *App) fetchGameResults(gameNumber int) (deferred bool) {
 	if a.printServerGate() != nil {
-		return // a game is active, or the link is stale; never touch it now
+		return true // a game is active, or the link is stale; never touch it now
 	}
 	if !a.resultsMu.TryLock() {
-		return // a command is using the results API; retry next poll
+		return true // a command is using the results API; retry next poll
 	}
 	defer a.resultsMu.Unlock()
 
 	if err := a.pullGameResults(gameNumber); err != nil {
 		if deferrable(err) {
-			return // not now; retry in the next safe window, no attempt burnt
+			return true // not now; retry in the next safe window, no attempt burnt
 		}
 		a.noteFetchFailure(gameNumber, err)
-		return
+		return false
 	}
 	a.markFetched(gameNumber)
 	a.clearPending(gameNumber)
 	log.Printf("[agent] results: game #%d synced to central", gameNumber)
+	return false
 }
 
 // noteFetchFailure records a failed results fetch: exponential per-game backoff,
@@ -1044,11 +1191,12 @@ func printServerSafe(mode int) bool {
 // state (primary) AND the WS SERVERMODE allowlist (backstop) — with the age of
 // the SERVERMODE reading itself. Both signals must say idle, and the reading
 // they rest on must be current, before the agent touches the O-Zone print
-// server. The age matters because collect() is the sole writer of both: once
-// the WS link drops they stop moving, so a favourable pair is only as good as
-// the moment it was read (see maxServerModeAge).
+// server. The age matters because, without the Message Bus, the WS link is the
+// only source of both (collect, and observeFrame for readings that close the
+// gate): once it drops they stop moving, so a favourable pair is only as good
+// as the moment it was read (see maxServerModeAge).
 func (a *App) safeForPrintServer(mode int) bool {
-	return printServerSafe(mode) && a.gameState.Load() == stateIdle && a.serverModeFresh()
+	return printServerSafe(mode) && a.gameState.Load() == stateIdle && a.serverModeFresh() && !a.pollUnsettled.Load()
 }
 
 // noteServerMode records a freshly read SERVERMODE. It is the ONLY writer of
@@ -1083,6 +1231,15 @@ func (a *App) printServerGate() error {
 	if !a.serverModeFresh() {
 		return errLinkStale
 	}
+	// A game is reported before an unsettled poll: every poll during a game
+	// is unsettled (its reading does not read idle), and "game in progress" is
+	// what is happening.
+	if !printServerSafe(int(a.serverMode.Load())) || a.gameState.Load() != stateIdle {
+		return errGameActive
+	}
+	if a.pollUnsettled.Load() {
+		return errPollUnsettled
+	}
 	if !a.safeForPrintServer(int(a.serverMode.Load())) {
 		return errGameActive
 	}
@@ -1093,7 +1250,7 @@ func (a *App) printServerGate() error {
 // failed": the work is retried in the next safe window without burning an
 // attempt or counting against a batch's failure budget.
 func deferrable(err error) bool {
-	return errors.Is(err, errGameActive) || errors.Is(err, errLinkStale)
+	return errors.Is(err, errGameActive) || errors.Is(err, errLinkStale) || errors.Is(err, errPollUnsettled)
 }
 
 // reconcileState lets WS SERVERMODE correct the bus-driven game state if the bus
@@ -1103,16 +1260,48 @@ func (a *App) reconcileState(mode int) {
 	switch {
 	case gameActive(mode):
 		a.gameState.Store(stateActive)
-	case printServerSafe(mode):
+	case printServerSafe(mode) && !a.pollUnsettled.Load():
 		a.gameState.CompareAndSwap(stateActive, stateIdle)
 	}
+}
+
+// observeFrame is shown every frame O-Zone sends, as it arrives (see
+// ozone.Client.Observe). A server state that reads otherwise than idle closes
+// the gate at once wherever it turns up: as a reply, as a frame a call drops,
+// after the poll's verdict, or between polls. It counts as a sign that a game
+// has started, so neither the poll under way nor the next may clear a game on
+// an idle reading (see collect). It can only close the gate, never open it or
+// clear a game.
+func (a *App) observeFrame(f map[string]any) {
+	if !mayBeServerState(f) {
+		return
+	}
+	m := toInt(f["SERVERMODE"])
+	if printServerSafe(m) {
+		return
+	}
+	a.stateMu.Lock()
+	a.startSignals++
+	a.noteServerMode(m)
+	a.reconcileState(m)
+	a.stateMu.Unlock()
+}
+
+// mayBeServerState reports whether f could be a reply to GETSERVERSTATE: one
+// echoing it, or one with no echo but a SERVERMODE.
+func mayBeServerState(f map[string]any) bool {
+	_, hasMode := f["SERVERMODE"]
+	return ozone.Answers(f, "GETSERVERSTATE") && (f["CMD"] != nil || hasMode)
 }
 
 // handleBusEvent maps External Message Bus lifecycle events onto the game state.
 func (a *App) handleBusEvent(ev msgbus.Event) {
 	switch ev.Code {
 	case msgbus.EventGameStart:
+		a.stateMu.Lock()
+		a.startSignals++
 		a.gameState.Store(stateActive)
+		a.stateMu.Unlock()
 		if n, ok := ev.GameNumber(); ok {
 			a.mu.Lock()
 			a.lastBusGame = n
@@ -1128,9 +1317,31 @@ func (a *App) handleBusEvent(ev msgbus.Event) {
 		a.mu.Unlock()
 		if g > 0 {
 			a.queueFetch(g)
+			a.notBefore(g, time.Now().Add(a.cfg.GameFinishDelay))
 		}
 		go a.afterFinish()
 	}
+}
+
+// notBefore keeps game n off the print server until t. A game the bus reports
+// finished is not fetched until GAME_FINISH_DELAY has passed, so O-Zone has
+// finished writing it, whatever reaches it first: afterFinish waits the delay
+// out, but a drain or cache refresh a poll launches (finish work left pending
+// from an earlier game, results polling, the slow poll's refresh) need not.
+func (a *App) notBefore(n int, t time.Time) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if p := a.pendingFetch[n]; p != nil && p.notBefore.Before(t) {
+		p.notBefore = t
+	}
+}
+
+// tooSoon reports whether game n is still inside the wait notBefore set.
+func (a *App) tooSoon(n int, now time.Time) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	p := a.pendingFetch[n]
+	return p != nil && now.Before(p.notBefore)
 }
 
 // afterFinish waits out the finish delay (so O-Zone finishes writing the game),
@@ -1138,7 +1349,30 @@ func (a *App) handleBusEvent(ev msgbus.Event) {
 func (a *App) afterFinish() {
 	time.Sleep(a.cfg.GameFinishDelay)
 	a.gameState.CompareAndSwap(stateFinishing, stateIdle)
-	a.drainPendingFetches()
+	a.finishWork()
+}
+
+// finishWork drains the fetches a finished game queued and refreshes the cache.
+// If the print server is off-limits right now (the poll confirming the game's
+// end has not come yet, or the next game has begun), or the drain has to put a
+// game off part-way (a poll failing under it, the results lock busy), the work
+// is left to the next poll that finds the print server open, rather than
+// dropped until another game ends: with results polling off, nothing else
+// drains what the bus queued.
+//
+// The work is marked pending before the gate is read and claimed after, so a
+// poll that opens the gate in between still finds it.
+func (a *App) finishWork() {
+	a.finishPending.Store(true)
+	if a.printServerGate() != nil {
+		return
+	}
+	if !a.finishPending.CompareAndSwap(true, false) {
+		return // another run has taken it
+	}
+	if a.drainPendingFetches() {
+		a.finishPending.Store(true)
+	}
 	a.refreshCache()
 }
 
@@ -1184,6 +1418,9 @@ func (a *App) refreshCache() {
 		num := toInt(gm["gamenum"])
 		if num <= 0 || toInt(gm["valid"]) != 1 || a.store.HasRaw(num) {
 			continue
+		}
+		if a.tooSoon(num, time.Now()) {
+			continue // just finished: the finish work caches it after the delay
 		}
 		// Stop immediately if a game starts mid-refresh.
 		if !a.safeForPrintServer(int(a.serverMode.Load())) {

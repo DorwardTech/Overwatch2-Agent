@@ -36,7 +36,7 @@ PC itself is the usual choice; the one thing to know about that is under
    > release before running it:
    >
    > ```powershell
-   > Get-FileHash .\overwatch-agent_1.6.3_windows_setup.exe -Algorithm SHA256
+   > Get-FileHash .\overwatch-agent_1.6.5_windows_setup.exe -Algorithm SHA256
    > ```
 
    The installer copies the agent to `C:\Program Files\Overwatch Agent\` and
@@ -95,7 +95,7 @@ the identical agent:
    check it against `SHA256SUMS.txt` from the same release:
 
    ```powershell
-   Get-FileHash .\overwatch-agent_1.6.3_windows_amd64.zip -Algorithm SHA256
+   Get-FileHash .\overwatch-agent_1.6.5_windows_amd64.zip -Algorithm SHA256
    ```
 
 2. **Extract** it to `C:\Program Files\Overwatch Agent\`. Keep the executable
@@ -120,7 +120,7 @@ The installer itself takes the usual Inno Setup switches, so a scripted rollout
 can run it unattended:
 
 ```powershell
-.\overwatch-agent_1.6.3_windows_setup.exe /VERYSILENT /NORESTART
+.\overwatch-agent_1.6.5_windows_setup.exe /VERYSILENT /NORESTART
 ```
 
 A silent install registers and configures the service but does not open the
@@ -187,12 +187,15 @@ already present in the process environment takes precedence over the file.
 The settings are the same as everywhere else — see the README's configuration
 table — with these defaults on Windows:
 
-| Setting | Windows default | Elsewhere |
-|---|---|---|
-| `CACHE_DIR` | `<data>\cache` | `./cache` |
-| `BUFFER_FILE` | `<data>\buffer.json` | off |
-| `PACK_IR_BUFFER_FILE` | `<data>\packir-buffer.json` | off |
-| `LOG_FILE` | `<data>\logs\agent.log` | off (console only) |
+| Setting | Windows default | Docker image | Elsewhere |
+|---|---|---|---|
+| `CACHE_DIR` | `<data>\cache` | `/data/cache` | `./cache` |
+| `BUFFER_FILE` | `<data>\buffer.json` | `/data/cache/buffer.json` | off |
+| `PACK_IR_BUFFER_FILE` | `<data>\packir-buffer.json` | `/data/cache/pack-ir-buffer.json` | off |
+| `LOG_FILE` | `<data>\logs\agent.log` | off (console only) | off (console only) |
+
+The Docker image's defaults apply when the agent can write to `/data/cache`;
+otherwise it falls back to the last column and logs why at startup.
 
 After changing the file by hand, restart the service:
 `.\overwatch-agent.exe restart`. The setup page does that for you.

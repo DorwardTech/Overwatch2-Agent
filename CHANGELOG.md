@@ -6,6 +6,100 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 The Site Agent and central Overwatch are versioned independently.
 
+## [1.6.5] — 2026-10-24
+
+Completes 1.6.4's reply matching, which was never published: everything in it
+ships here. A reply now has to arrive after the request it answers, so a reply
+left waiting since an earlier request cannot be taken for a new one. A poll
+whose replies arrive out of step, or that fails part-way, can no longer let the
+agent near the print server.
+
+### Fixed
+
+- **A reply left waiting since the previous poll could pass for a new one.**
+  1.6.4 matched replies by the request name the game server repeats in each
+  one. A server-state reply that arrived between polls (another client's, or
+  a duplicate) still carried the right name, so the next poll could take it
+  for its own. If it said "between games" while a game had since started, the
+  agent cleared the game it knew about and the print server became reachable
+  during play. The agent now reads the connection continuously, never
+  pausing, and notes when each message arrives, and a reply counts only if it
+  arrived after its request was written. Up to 64 messages wait to be looked
+  at; past that, new ones are dropped, so memory stays bounded.
+- **A poll could leave the print server reachable on an out-of-date
+  reading.** A server state saying a game is starting or under way takes
+  effect the moment it arrives, wherever it turns up: as the reply, beside
+  it, or after the poll has finished. A slow or failed second reply cannot
+  hold it back. A reading that says "between games" opens the print server, or
+  marks a game finished, only once both of the poll's replies are in and
+  agree; until then the print server stays as the last poll left it, so work
+  already under way between games is not cut short by each poll. The
+  messages dropped during the poll are checked, and so is the reply taken for
+  the pack list, in case the server state came back in its place. If one of
+  them could be the server state, or a message was dropped unread, the poll
+  is unsettled: its reading is used if it says a game is on, and the poll
+  cannot mark a game finished or allow the print server until a clean poll
+  does. Duplicates that say the same thing, and replies to other requests, do
+  not count, so a game server that repeats itself still lets finished games
+  be fetched. After a game starts, as the message bus or such a reading
+  reports it, the next poll's "between games" reading cannot mark the game
+  finished on its own; the poll after that can. That way another client's
+  reading from before the start, delivered late, cannot undo it. A poll that
+  fails part-way leaves the print server off-limits.
+
+### Changed
+
+- The once-a-minute log line counts each kind of discarded message: replies
+  to another request, messages that arrived before the request they could
+  have answered, and messages dropped because too many were waiting.
+- Work on the print server held back because the last poll could not confirm
+  the server state says so, and is retried after the next clean poll. During
+  a game it still says a game is in progress. While it waits on a reading
+  that says the game server is idle, the agent polls at the in-game rate, so
+  that clean poll comes sooner.
+- A finished game's follow-up (fetching what the message bus queued, and
+  refreshing the cache) that finds the print server off-limits, or has to
+  put a game off part-way, runs at the next poll that finds it open, instead
+  of waiting for another game to end. A game is still never fetched before
+  `GAME_FINISH_DELAY` has passed since the message bus reported it finished.
+
+## [1.6.4] — 2026-10-23
+
+Two fixes for an agent that lost data it already had. The game server's
+replies are matched to the request they answer, so telemetry no longer goes
+out without its packs. The container image keeps its cache and unsent
+telemetry on the volume mounted for them, with no settings for a Docker volume
+(a host directory owned by root needs `chown` first). Not published: its
+fixes ship in 1.6.5.
+
+### Fixed
+
+- **The reply to one request could be taken as the answer to another.** The
+  agent sent a request to the game server and took the next message back as
+  its reply, without checking which request that message answered. With
+  several clients connected to one game server, messages stopped lining up
+  with requests. At one venue about half of the pushes went out with the pack
+  list, the game list or the team list where the server state belonged, and no
+  packs. That telemetry was lost, and central showed the venue as "Idle, game
+  #0". The agent now checks the request name the game server repeats in every
+  reply and discards messages that answer a different request, within the same
+  10-second wait. A reply without a request name is still accepted. Once a
+  minute the log says how many messages were discarded, if any were.
+- **A container deployed without the compose files kept its state where a
+  redeploy wipes it.** The game cache went to `./cache` inside the container,
+  and both spill files (unsent telemetry and pack-IR readings) were switched
+  off. A Coolify "Docker image" application is one example, even with a volume
+  at `/data/cache`. Each redeploy then downloaded the whole cache from central
+  again and dropped any telemetry buffered during an outage. The image now
+  ships `/data/cache` owned by the user the agent runs as, and the agent uses
+  it by default whenever it can write there. The cache goes in `/data/cache`,
+  with `buffer.json` and `pack-ir-buffer.json` beside it, as the compose files
+  set them. A Docker volume mounted there works with no settings. A host
+  directory owned by root is not used: the agent keeps the old defaults rather
+  than switch the cache off, and logs which directory to `chown` to 65532.
+  `CACHE_DIR`, `BUFFER_FILE` and `PACK_IR_BUFFER_FILE` still override all of
+  this, and Windows is unchanged.
+
 ## [1.6.3] — 2026-10-23
 
 Rebuilt with Go 1.26.10 for security fixes in Go's standard library. Nothing in

@@ -8,7 +8,7 @@ FROM --platform=$BUILDPLATFORM golang:1.26.10-alpine AS build
 # Default to the current release so an un-tagged build (e.g. main -> :latest)
 # still reports a real version, not "dev". Tagged releases override this via a
 # build-arg (see docker-image.yml). Keep in sync with internal/version.Value.
-ARG AGENT_VERSION=1.6.3
+ARG AGENT_VERSION=1.6.5
 ARG TARGETOS TARGETARCH TARGETVARIANT
 WORKDIR /src
 COPY go.mod go.sum ./
@@ -19,9 +19,14 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} \
     GOARM=$(printf '%s' "${TARGETVARIANT}" | tr -d 'v') go build -trimpath \
     -ldflags="-s -w -X overwatch/agent/internal/version.Value=${AGENT_VERSION}" \
     -o /out/agent ./cmd/agent
+# The state directory (internal/platform: StateDir), made here because the
+# runtime image has no shell. Copied below owned by the runtime user, so a
+# Docker volume mounted on it starts out writable by the agent.
+RUN mkdir -p /out/data/cache
 
 FROM gcr.io/distroless/static:nonroot
 COPY --from=build /out/agent /agent
+COPY --from=build --chown=65532:65532 /out/data /data
 USER nonroot:nonroot
 EXPOSE 8088
 ENTRYPOINT ["/agent"]
