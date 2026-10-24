@@ -18,8 +18,28 @@ permissions:
   contents: write
 
 jobs:
+  # A release tag must be exactly vMAJOR.MINOR.PATCH. Anything else still
+  # matches 'v*' above: a mistyped "v.1.6.5" once produced a broken release.
+  # Every other job waits on this one (build needs it; installer and release
+  # need build), so nothing is built or uploaded for a bad tag. A manual run on
+  # a branch passes straight through.
+  tag:
+    name: Check the release tag
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check the release tag
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error title=Not a release tag::Tag '$TAG' must be vMAJOR.MINOR.PATCH (for example v1.2.3). Nothing was built or uploaded; delete the tag and push the right one."
+            exit 1
+          fi
+
   build:
     name: Build windows/${{ matrix.arch }}
+    needs: tag
     runs-on: ubuntu-latest
     strategy:
       matrix:

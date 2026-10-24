@@ -78,10 +78,17 @@ receive backported fixes.
 
 Context that helps when assessing a report:
 
-- **No inbound ports by default.** The agent only makes outbound connections
-  (HTTPS to central, LAN to O-Zone). Inbound listeners exist *only* when you opt
-  in: the print-server proxy (`ENABLE_PROXY`), the admin API (`ADMIN_API_ADDR`),
-  and the health endpoint (`HEALTH_ADDR`).
+- **One passive inbound port by default.** The agent makes outbound
+  connections (HTTPS to central, LAN to O-Zone), and from 1.7.0 it also listens
+  on UDP `12106` for the game server's LAN announcement. That listener never
+  answers anything; a datagram is used only if it parses as an announcement,
+  comes from a directly connected network, and was sent from the address it
+  names. With a fixed `OZONE_WS_HOST` it only reports what it hears (turn it off
+  with `ENABLE_LIB_LISTENER=false`); with `OZONE_WS_HOST=auto` it chooses the
+  game server's address, and refuses to choose between two servers or two
+  addresses. The other inbound listeners exist *only* when you opt in: the
+  print-server proxy (`ENABLE_PROXY`), the admin API (`ADMIN_API_ADDR`), and
+  the health endpoint (`HEALTH_ADDR`).
 - **The print-server proxy is intentionally unauthenticated.** It re-speaks
   O-Zone's plain-TCP print-server protocol so existing scoring software (TORN)
   can connect to it unmodified — that software cannot present a credential. It

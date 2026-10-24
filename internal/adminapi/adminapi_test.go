@@ -149,6 +149,26 @@ func TestControlPanelServedWithoutAuth(t *testing.T) {
 	}
 }
 
+// The overview's announcement block (lib) is on the page: where the agent
+// connects, when the game server was last heard, and the servers auto could
+// not choose between. This asserts on the shipped page, because the rendering
+// happens in the browser.
+func TestControlPanelShowsTheAnnouncement(t *testing.T) {
+	s, _ := newServer()
+	body := do(t, s.Handler(), "GET", "/", "").Body.String()
+	for _, want := range []string{
+		`stat("O-Zone address", ozoneAddress(o));`,
+		`stat("Announcement", announcement(o.lib));`,
+		`renderCandidates(o.lib);`,
+		`id="libCard"`,
+		"listener off",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the control panel is missing %s", want)
+		}
+	}
+}
+
 func TestAPIStillGatedAfterUIAdded(t *testing.T) {
 	s, _ := newServer()
 	h := s.Handler()

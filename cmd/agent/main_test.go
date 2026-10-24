@@ -4,6 +4,7 @@ import (
 	"errors"
 	"flag"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -49,6 +50,48 @@ func TestParseArgsErrors(t *testing.T) {
 	}
 	if _, _, err := parseArgs([]string{"--no-such-flag"}); err == nil {
 		t.Error("an unknown flag was accepted")
+	}
+}
+
+func TestParseArgsDiscover(t *testing.T) {
+	for args, want := range map[string]int{
+		"discover":                             defaultDiscoverSeconds,
+		"discover --seconds 5":                 5,
+		"discover -seconds=1":                  1,
+		"discover --seconds 60":                60,
+		"discover --config x.env --seconds 30": 30,
+	} {
+		cmd, opts, err := parseArgs(strings.Fields(args))
+		if err != nil {
+			t.Errorf("%s: %v", args, err)
+			continue
+		}
+		if cmd != "discover" || opts.seconds != want {
+			t.Errorf("%s: cmd %q, seconds %d; want discover, %d", args, cmd, opts.seconds, want)
+		}
+	}
+	if defaultDiscoverSeconds != 11 {
+		t.Errorf("default = %d s, want 11", defaultDiscoverSeconds)
+	}
+
+	for _, args := range []string{
+		"discover --seconds 0",
+		"discover --seconds 61",
+		"discover --seconds -3",
+		"discover --seconds ten",
+		"discover --seconds",
+		"discover --seconds 5 extra",
+		// --seconds is discover's alone.
+		"run --seconds 5",
+		"healthcheck --seconds 5",
+		"install --seconds 5",
+		"--seconds 5",
+	} {
+		if _, _, err := parseArgs(strings.Fields(args)); err == nil {
+			t.Errorf("%s: accepted", args)
+		} else if errors.Is(err, flag.ErrHelp) {
+			t.Errorf("%s: treated as a request for help", args)
+		}
 	}
 }
 

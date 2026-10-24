@@ -11,9 +11,23 @@ services:
       context: .
       args:
         # Stamp the built binary's version so it never reports "dev".
-        AGENT_VERSION: ${AGENT_VERSION:-1.6.5}
+        AGENT_VERSION: ${AGENT_VERSION:-1.7.0}
     # image: ghcr.io/dorwardtech/overwatch2-agent:latest
     restart: unless-stopped
+    # OZONE_WS_HOST=auto finds O-Zone from the announcement it broadcasts on
+    # the venue LAN (UDP 12106), which only a host-networked container hears.
+    # To turn it on, uncomment network_mode below and:
+    #   - comment out `ports:` and `extra_hosts:` further down (neither applies);
+    #   - every listener now binds the host directly, so set
+    #     PROXY_LISTEN_ADDR=<venue-LAN-IP>:12123 in .env (the proxy is
+    #     unauthenticated), change HEALTH_ADDR below to '127.0.0.1:8088' (the
+    #     healthcheck probes it as given), and set ADMIN_API_ADDR to a LAN IP
+    #     or leave it unset;
+    #   - ports 12123, 8088 and 8097 must be free on the host.
+    # With a fixed OZONE_WS_HOST the agent still listens, only to report what it
+    # hears (ENABLE_LIB_LISTENER, on by default). On the default bridge network
+    # it hears nothing, which is harmless.
+    # network_mode: host   # needed for OZONE_WS_HOST=auto: the broadcast never reaches a bridge network
     env_file: .env
     environment:
       HEALTH_ADDR: ':8088'

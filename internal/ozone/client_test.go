@@ -1,9 +1,12 @@
 package ozone
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -614,5 +617,72 @@ func TestObserveSeesEveryFrame(t *testing.T) {
 	}
 	if c.OverflowFrames() == 0 {
 		t.Fatal("no frame was dropped, so the test does not show dropped frames are observed")
+	}
+}
+
+// An address not chosen yet is never dialled: empty means this computer.
+func TestDialAndProbeRefuseAnEmptyHost(t *testing.T) {
+	if _, err := Dial(" ", "12113"); !errors.Is(err, ErrNoHost) {
+		t.Fatalf("Dial(\"\") error = %v, want ErrNoHost", err)
+	}
+	if _, err := Probe(context.Background(), "", "12113", time.Second); !errors.Is(err, ErrNoHost) {
+		t.Fatalf("Probe(\"\") error = %v, want ErrNoHost", err)
+	}
+}
+
+func TestProbeReturnsTheServerMode(t *testing.T) {
+	var asked []string
+	var mu sync.Mutex
+	upgrader := websocket.Upgrader{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		var req map[string]string
+		if conn.ReadJSON(&req) != nil {
+			return
+		}
+		mu.Lock()
+		asked = append(asked, req["CMD"])
+		mu.Unlock()
+		_ = conn.WriteJSON(map[string]any{"CMD": req["CMD"], "SERVERMODE": 2})
+	}))
+	defer srv.Close()
+	host, port, _ := strings.Cut(strings.TrimPrefix(srv.URL, "http://"), ":")
+
+	mode, err := Probe(context.Background(), host, port, 2*time.Second)
+	if err != nil || mode != 2 {
+		t.Fatalf("Probe() = %d, %v; want 2", mode, err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(asked) != 1 || asked[0] != "GETSERVERSTATE" {
+		t.Fatalf("Probe sent %v, want only GETSERVERSTATE", asked)
+	}
+}
+
+func TestProbeGivesUpAtItsTimeout(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		var req map[string]string
+		_ = conn.ReadJSON(&req)
+		time.Sleep(2 * time.Second) // never answers in time
+	}))
+	defer srv.Close()
+	host, port, _ := strings.Cut(strings.TrimPrefix(srv.URL, "http://"), ":")
+
+	start := time.Now()
+	if _, err := Probe(context.Background(), host, port, 200*time.Millisecond); err == nil {
+		t.Fatal("Probe() succeeded without a reply")
+	}
+	if took := time.Since(start); took > time.Second {
+		t.Fatalf("Probe took %s with a 200ms timeout", took)
 	}
 }

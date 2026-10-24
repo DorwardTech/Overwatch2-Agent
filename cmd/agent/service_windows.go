@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"golang.org/x/sys/windows"
@@ -254,6 +255,10 @@ func installService(opts options) error {
 		_ = s.Delete()
 		return err
 	}
+	// Best-effort, and so after the point of no return: without the rule a
+	// fixed host still works, so failing to add it is a warning, never a
+	// reason to undo the install.
+	firewallErr := allowDiscovery(exe)
 
 	fmt.Printf("Installed service %s (%s).\n", serviceName, serviceDisplayName)
 	fmt.Printf("  Binary:   %s\n", exe)
@@ -265,12 +270,19 @@ func installService(opts options) error {
 		fmt.Printf("  Config:   %s\n", configPath)
 	}
 	fmt.Printf("  Log:      %s\n", filepath.Join(dataDir, "logs", "agent.log"))
+	if firewallErr == nil {
+		fmt.Printf("  Firewall: inbound UDP %d from the local subnet   (rule %q)\n", firewallPort, firewallRuleName)
+	}
 	if err := createSetupShortcut(exe); err != nil {
 		fmt.Printf("  Setup:    overwatch-agent setup   (no Start Menu entry: %v)\n", err)
 	} else {
 		fmt.Printf("  Setup:    Start Menu -> \"Overwatch Agent Setup\"\n")
 	}
-	for _, w := range installWarnings(exe, configPath, dataDir, wroteTemplate) {
+	warnings := installWarnings(exe, configPath, dataDir, wroteTemplate)
+	if firewallErr != nil {
+		warnings = append(warnings, firewallWarning(firewallErr, exe))
+	}
+	for _, w := range warnings {
 		fmt.Printf("\nWarning: %s\n", w)
 	}
 	fmt.Println()
@@ -443,6 +455,42 @@ func icacls(args ...string) error {
 	return nil
 }
 
+// allowDiscovery adds the firewall rule that lets the game server's LAN
+// announcement reach program, replacing any rule an earlier install left.
+func allowDiscovery(program string) error {
+	_ = netsh(firewallDeleteArgs()...) // a first install has nothing to delete
+	return netsh(firewallAddArgs(program)...)
+}
+
+// removeDiscoveryRule deletes the firewall rule if there is one. netsh treats
+// a missing rule as a failure, in the system's language, so it is asked
+// first whether the rule exists; a missing rule is not worth a warning.
+func removeDiscoveryRule() error {
+	if netsh(firewallShowArgs()...) != nil {
+		return nil
+	}
+	return netsh(firewallDeleteArgs()...)
+}
+
+// netsh runs the Windows network shell by its absolute path in System32, as
+// icacls is run, with the command line written exactly as netshCommandLine
+// renders it (see there for why Go's own quoting is not used).
+func netsh(args ...string) error {
+	exe := "netsh.exe"
+	if root := os.Getenv("SystemRoot"); root != "" {
+		exe = filepath.Join(root, "System32", "netsh.exe")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, exe)
+	cmd.SysProcAttr = &syscall.SysProcAttr{CmdLine: netshCommandLine(exe, args)}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%s: %w\n%s", filepath.Base(exe), err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
 func underDir(dir, path string) bool {
 	rel, err := filepath.Rel(dir, path)
 	if err != nil {
@@ -478,6 +526,10 @@ func uninstallService() error {
 		fmt.Fprintf(os.Stderr, "warning: event log source not removed: %v\n", err)
 	}
 	removeSetupShortcut()
+	if err := removeDiscoveryRule(); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: firewall rule %q not removed: %v\nRemove it from an elevated prompt with:\n  %s\n",
+			firewallRuleName, err, netshCommandLine("netsh", firewallDeleteArgs()))
+	}
 	fmt.Printf("Removed service %s. The configuration, cache and log files were left in place.\n", serviceName)
 	return nil
 }

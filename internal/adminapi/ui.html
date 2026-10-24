@@ -106,6 +106,12 @@
       <div class="grid" id="stats"></div>
     </section>
 
+    <section class="card hidden" id="libCard">
+      <h2>Game servers heard</h2>
+      <p class="faint" id="libNote" style="margin:-4px 0 12px"></p>
+      <div id="libWrap"></div>
+    </section>
+
     <section class="card">
       <h2>Collect from Overwatch</h2>
       <p class="faint" style="margin:-4px 0 12px">
@@ -191,6 +197,8 @@
     const stat = (k, v) => cells.push('<div class="stat"><div class="k">' + k + '</div><div class="v">' + v + "</div></div>");
     stat("State", '<span class="badge ' + stateBadge(o.state) + '">' + (o.state ?? "—") + "</span>");
     stat("Server mode", o.server_mode ?? "—");
+    stat("O-Zone address", ozoneAddress(o));
+    stat("Announcement", announcement(o.lib));
     stat("Cached games", o.games ?? "—");
     stat("Message bus", o.msg_bus_connected ? '<span class="badge ok">connected</span>' : '<span class="badge warn">down</span>');
     if ("proxy_connections" in o) stat("Proxy clients", o.proxy_connections);
@@ -202,6 +210,84 @@
     stat("Uptime", fmtUptime(o.uptime_seconds));
     $("stats").innerHTML = cells.join("");
     $("stamp").textContent = "as of " + new Date().toLocaleTimeString();
+  }
+
+  // The game server's LAN announcement (o.lib), as the agent hears it. Every
+  // string in it came off the network, so all of it is escaped.
+  const warnBadge = (text, title) =>
+    '<span class="badge warn"' + (title ? ' title="' + esc(title) + '"' : "") + ">" + esc(text) + "</span>";
+
+  function ago(when) {
+    const t = Date.parse(when);
+    if (!t) return "—";
+    const s = Math.max(0, Math.round((Date.now() - t) / 1000));
+    if (s < 120) return s + " s ago";
+    if (s < 7200) return Math.round(s / 60) + " min ago";
+    return Math.round(s / 3600) + " h ago";
+  }
+
+  // ozoneAddress is the game server the agent talks to: with auto, the one it
+  // chose, or what it is doing about choosing; otherwise the fixed address.
+  function ozoneAddress(o) {
+    const lib = o.lib;
+    if (!lib || lib.mode !== "auto") {
+      return o.ozone_host ? esc(o.ozone_host) : '<span class="faint">fixed (OZONE_WS_HOST)</span>';
+    }
+    if (!o.ozone_host) {
+      const word = { waiting: "choosing…", bind_failed: "cannot listen" }[lib.state] || lib.state || "choosing…";
+      return warnBadge(word, lib.error);
+    }
+    const sel = lib.selected;
+    return esc(o.ozone_host) + ' <span class="faint">· auto' +
+      (sel ? " · site " + esc(sel.sid_raw || sel.sid) + " arena " + esc(sel.arena) : "") + "</span>";
+  }
+
+  function announcement(lib) {
+    if (!lib) return '<span class="faint">listener off</span>';
+    if (lib.state === "bind_failed") return warnBadge("cannot listen", lib.error);
+    if (lib.state === "ambiguous") return warnBadge("several servers");
+    if (lib.state === "conflict") return warnBadge("two addresses");
+    if (lib.last && lib.last.received_at) return "heard " + ago(lib.last.received_at);
+    if (!lib.packets) return lib.state === "waiting" ? warnBadge("none heard") : '<span class="faint">none heard</span>';
+    // Announcements arrive, but none from the server this agent uses.
+    const latest = (lib.candidates || []).map((c) => c.last_heard_at).sort().pop();
+    if (latest) {
+      if (lib.mode === "auto") return warnBadge("heard " + ago(latest) + ", none matches", selectorText(lib.selector));
+      return "heard " + ago(latest) + ' <span class="faint">· not from OZONE_WS_HOST</span>';
+    }
+    return '<span class="faint">not heard lately (' + esc(lib.packets) + " in all)</span>";
+  }
+
+  function selectorText(sel) {
+    if (!sel) return "";
+    const part = (k, v) => k + "=" + (v === null || v === undefined ? "any" : v);
+    return part("OZONE_SID", sel.sid) + " " + part("OZONE_ARENA", sel.arena);
+  }
+
+  // With several servers, or one at two addresses, auto waits; this is what
+  // it heard, so the operator can tell it which one.
+  function renderCandidates(lib) {
+    // Also while auto waits with servers heard: none matches its site and
+    // arena, or none is usable, and this shows what is being announced.
+    const waitingWithServers = !!lib && lib.mode === "auto" && lib.state === "waiting" && (lib.candidates || []).length > 0;
+    const choosing = !!lib && (lib.state === "ambiguous" || lib.state === "conflict" || waitingWithServers);
+    $("libCard").classList.toggle("hidden", !choosing);
+    if (!choosing) return;
+    $("libNote").textContent = lib.state === "ambiguous"
+      ? "More than one game server is announcing itself, so the agent is not choosing. Set OZONE_SID and OZONE_ARENA to the one it should use."
+      : lib.state === "conflict"
+        ? "One game server is announced from more than one address, so the agent is not choosing. Set OZONE_WS_HOST to the right address."
+        : "Game servers are announcing themselves, but none it can use matches " + selectorText(lib.selector) +
+          ", so the agent is still waiting. Check OZONE_SID and OZONE_ARENA against the servers below.";
+    const rows = (lib.candidates || []).map((c) =>
+      "<tr><td>" + esc(c.ip) + "</td><td>" + esc(c.sender) + "</td><td>" + esc(c.sid_raw || c.sid) + "</td>" +
+      '<td class="num">' + esc(c.arena) + '</td><td class="num">' + esc(c.packets) + "</td>" +
+      "<td>" + esc(ago(c.last_heard_at)) + "</td>" +
+      "<td>" + (c.usable ? '<span class="badge ok">usable</span>' : warnBadge(c.reason || "not usable")) + "</td></tr>"
+    ).join("");
+    $("libWrap").innerHTML =
+      '<table><thead><tr><th>Address</th><th>Sender</th><th>Site</th><th class="num">Arena</th>' +
+      '<th class="num">Packets</th><th>Last heard</th><th>Status</th></tr></thead><tbody>' + rows + "</tbody></table>";
   }
 
   function renderGames(games) {
@@ -260,6 +346,7 @@
     try {
       const [o, games] = await Promise.all([api("/api/overview"), api("/api/games")]);
       renderStats(o);
+      renderCandidates(o.lib);
       renderGames(games);
     } catch (e) {
       handle(e, "Refresh failed");
