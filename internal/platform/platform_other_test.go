@@ -2,13 +2,17 @@
 
 package platform
 
-import "testing"
+import (
+	"path/filepath"
+	"testing"
+)
 
 // Without a data directory the agent must behave exactly as it always has:
 // the container image sets every path it needs, and a default that suddenly
 // pointed somewhere else would move a fleet's caches.
 func TestNoDataDirKeepsHistoricalDefaults(t *testing.T) {
 	t.Setenv(DataDirEnv, "")
+	withStateDir(t, filepath.Join(t.TempDir(), "absent"))
 
 	if got := DataDir(); got != "" {
 		t.Fatalf("DataDir() = %q, want empty", got)

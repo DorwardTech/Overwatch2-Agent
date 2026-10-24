@@ -26,21 +26,38 @@ func DataDir() string {
 	return defaultDataDir()
 }
 
-// DefaultCacheDir is the print-server cache location: <data>/cache, or the
-// historical ./cache when no data directory is known.
+// DefaultCacheDir is the print-server cache location: <data>/cache; else the
+// container state directory when it is usable (StateDir); else the historical
+// ./cache.
 func DefaultCacheDir() string {
 	if d := DataDir(); d != "" {
 		return filepath.Join(d, "cache")
 	}
+	if d := StateDir(); d != "" {
+		return d
+	}
 	return "./cache"
 }
 
-// DefaultBufferFile is where unsent telemetry is spilled across restarts.
-// Empty (disabled) when no data directory is known, as before.
-func DefaultBufferFile() string { return inDataDir("buffer.json") }
+// DefaultBufferFile is where unsent telemetry is spilled across restarts:
+// under the data directory, else in the container state directory. Empty
+// (disabled) when neither is available, as before.
+func DefaultBufferFile() string {
+	if f := inDataDir("buffer.json"); f != "" {
+		return f
+	}
+	return inStateDir("buffer.json")
+}
 
-// DefaultPackIRBufferFile is the spill file for unsent pack-IR readings.
-func DefaultPackIRBufferFile() string { return inDataDir("packir-buffer.json") }
+// DefaultPackIRBufferFile is the spill file for unsent pack-IR readings. In
+// the state directory it takes the name the compose files have always given
+// it, so a volume they set up keeps its file.
+func DefaultPackIRBufferFile() string {
+	if f := inDataDir("packir-buffer.json"); f != "" {
+		return f
+	}
+	return inStateDir("pack-ir-buffer.json")
+}
 
 // DefaultLogFile is the agent's log file. Empty (log to the console) when no
 // data directory is known.
@@ -49,6 +66,14 @@ func DefaultLogFile() string { return inDataDir("logs", "agent.log") }
 // DefaultEnvFile is the configuration file the agent reads at startup when no
 // other is named. Empty when no data directory is known.
 func DefaultEnvFile() string { return inDataDir("agent.env") }
+
+func inStateDir(name string) string {
+	d := StateDir()
+	if d == "" {
+		return ""
+	}
+	return filepath.Join(d, name)
+}
 
 func inDataDir(elem ...string) string {
 	d := DataDir()

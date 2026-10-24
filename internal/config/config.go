@@ -29,10 +29,11 @@ type Config struct {
 	HealthAddr       string
 	BufferMax        int
 	// BufferFile spills unsent telemetry across restarts ("" disables). Path
-	// defaults come from internal/platform: in a container they are the
-	// historical values (./cache, spill files off) because the compose file
-	// sets the real ones; on Windows, or wherever AGENT_DATA_DIR is set, they
-	// live under one data directory so a service has somewhere to keep state.
+	// defaults come from internal/platform: on Windows, or wherever
+	// AGENT_DATA_DIR is set, they live under one data directory so a service
+	// has somewhere to keep state; in the container image they live in
+	// /data/cache, the volume's mount point, when the agent can write there;
+	// otherwise they are the historical values (./cache, spill files off).
 	BufferFile string
 
 	// Pack IR bench listener: an on-prem calibration node POSTs emitter-strength
