@@ -72,6 +72,13 @@
   }
   code { background: var(--bg); padding: 1px 5px; border-radius: 4px; font-size: 13px; }
   .paths { color: var(--muted); font-size: 13px; margin-top: 20px; }
+  .links { display: flex; gap: 20px; flex-wrap: wrap; }
+  .server { border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; margin-top: 10px; }
+  .server h3 { font-size: 15px; margin: 0 0 4px; }
+  .server p { margin: 2px 0; font-size: 14px; color: var(--muted); }
+  .server p.here { color: var(--ok); font-weight: 600; }
+  .server .buttons { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+  .advice { color: var(--muted); font-size: 14px; margin: 10px 0 0; }
 </style>
 </head>
 <body>
@@ -116,7 +123,7 @@
     </div>
 
     <div id="ozoneBox" style="margin-top:16px">
-      <p class="hint">Where the game server runs. If the agent is installed on that same computer, use <code>127.0.0.1</code>.</p>
+      <p class="hint">Where the game server runs. If the agent is installed on that same computer, use <code>127.0.0.1</code>. Not sure? <b>Find O-Zone on the network</b> lists every game server announcing itself here. Typing <code>auto</code> instead has the agent find the server by its announcement each time it starts.</p>
       <div class="row">
         <div>
           <label for="ozoneHost">Game server address <span class="var">OZONE_WS_HOST</span></label>
@@ -127,7 +134,25 @@
           <input id="ozonePort" type="text" spellcheck="false" placeholder="12113">
         </div>
       </div>
-      <button type="button" class="link" id="thisMachine">Use this computer (127.0.0.1)</button>
+      <div id="autoBox" style="display:none">
+        <div class="row">
+          <div>
+            <label for="ozoneSid">Site ID <span class="var">OZONE_SID</span></label>
+            <input id="ozoneSid" type="text" spellcheck="false" inputmode="numeric">
+          </div>
+          <div>
+            <label for="ozoneArena">Arena <span class="var">OZONE_ARENA</span></label>
+            <input id="ozoneArena" type="text" spellcheck="false" inputmode="numeric">
+          </div>
+        </div>
+        <p class="advice">With <code>auto</code> the agent connects to the game server announcing this site and arena. Find O-Zone on the network shows both. Leave them empty only if this network has a single game server.</p>
+      </div>
+      <div class="links">
+        <button type="button" class="link" id="thisMachine">Use this computer (127.0.0.1)</button>
+        <button type="button" class="link" id="find">Find O-Zone on the network</button>
+      </div>
+      <div class="msg" id="findMsg"></div>
+      <div id="servers"></div>
 
       <div class="row" style="margin-top:8px">
         <button type="button" id="testGame">Test this connection</button>
@@ -253,19 +278,23 @@ const $ = (id) => document.getElementById(id);
 
 const FIELDS = {
   CENTRAL_API_URL: "central", AGENT_TOKEN: "token",
-  OZONE_WS_HOST: "ozoneHost", OZONE_WS_PORT: "ozonePort",
+  OZONE_WS_HOST: "ozoneHost", OZONE_WS_PORT: "ozonePort", OZONE_SID: "ozoneSid", OZONE_ARENA: "ozoneArena",
   NEXUS_DSN: "nexusDsn", LASERTAG_URL: "lasertagUrl", GAME_SYNC_INTERVAL: "gameSync",
   PROXY_LISTEN_ADDR: "proxyAddr", ADMIN_API_ADDR: "adminAddr", ADMIN_API_TOKEN: "adminToken",
   POLL_INTERVAL: "poll", IDLE_POLL_INTERVAL: "idle", SLOW_POLL_INTERVAL: "slow", HEALTH_ADDR: "health",
 };
 const DEFAULTS = {
   CENTRAL_API_URL: "https://ow2.lasertag.net.au/api/agent/ingest",
-  OZONE_WS_HOST: "127.0.0.1", OZONE_WS_PORT: "12113",
+  OZONE_WS_HOST: "127.0.0.1", OZONE_WS_PORT: "12113", OZONE_SID: "", OZONE_ARENA: "",
   GAME_SYNC_INTERVAL: "30",
   PROXY_LISTEN_ADDR: "0.0.0.0:12124", ADMIN_API_ADDR: "0.0.0.0:8097",
   POLL_INTERVAL: "5", IDLE_POLL_INTERVAL: "15", SLOW_POLL_INTERVAL: "60", HEALTH_ADDR: "127.0.0.1:8088",
 };
 function legacyMode() { return $("modeLegacy").checked; }
+// auto, in any case, has the agent find the game server by its announcement.
+function isAuto(v) { return String(v || "").trim().toLowerCase() === "auto"; }
+// The servers the last Find heard, for the port 12123 clash check.
+let lastServers = [];
 
 async function api(path, options = {}) {
   const res = await fetch(path, {
@@ -324,13 +353,28 @@ function toggles() {
   $("syncBox").style.display = legacy ? "block" : "none";
   $("proxyBox").style.display = $("cache").checked ? "block" : "none";
   $("adminBox").style.display = $("admin").checked ? "block" : "none";
+  $("autoBox").style.display = isAuto($("ozoneHost").value) ? "block" : "none";
   const addr = $("proxyAddr").value || "";
   const clash = addr.endsWith(":12123");
-  const local = ["127.0.0.1", "localhost", "::1"].includes(($("ozoneHost").value || "").trim());
+  const local = hostIsLocal();
   $("proxyWarn").style.display = clash && local ? "block" : "none";
   if (clash && local) {
     $("proxyWarn").textContent = "Port 12123 already belongs to the game server on this computer, so the agent cannot use it. Pick another port — 12124 works — and set the printing software to match.";
   }
+}
+
+// hostIsLocal reports whether the game server address names this computer:
+// the loopback address, or an address the last Find heard announced from
+// here. auto counts when a server it could choose was announced from here.
+function hostIsLocal() {
+  const host = ($("ozoneHost").value || "").trim();
+  if (["127.0.0.1", "localhost", "::1"].includes(host)) return true;
+  if (isAuto(host)) {
+    const sid = $("ozoneSid").value.trim(), arena = $("ozoneArena").value.trim();
+    return lastServers.some((s) => s.local && s.sender_ok &&
+      (sid === "" || Number(sid) === s.sid) && (arena === "" || Number(arena) === s.arena));
+  }
+  return lastServers.some((s) => (s.local && s.ip === host) || (s.sender_local && s.sender === host));
 }
 
 function collect() {
@@ -358,6 +402,15 @@ function collect() {
     s.GAME_SYNC_INTERVAL = "";
   }
   if (!$("admin").checked) { s.ADMIN_API_ADDR = ""; s.ADMIN_API_TOKEN = ""; }
+  if (isAuto(s.OZONE_WS_HOST)) {
+    s.OZONE_WS_HOST = "auto";
+  } else {
+    // The site and arena only mean something with auto. Written blank, so a
+    // fixed address does not leave them behind to confuse the next reader;
+    // the file keeps them behind a comment.
+    s.OZONE_SID = "";
+    s.OZONE_ARENA = "";
+  }
   return s;
 }
 
@@ -404,6 +457,8 @@ $("cache").addEventListener("change", toggles);
 $("admin").addEventListener("change", toggles);
 $("proxyAddr").addEventListener("input", toggles);
 $("ozoneHost").addEventListener("input", toggles);
+$("ozoneSid").addEventListener("input", toggles);
+$("ozoneArena").addEventListener("input", toggles);
 $("modeOzone").addEventListener("change", toggles);
 $("modeLegacy").addEventListener("change", toggles);
 
@@ -416,14 +471,144 @@ $("testCentral").addEventListener("click", (e) => busy(e.target, async () => {
   show($("centralMsg"), r.ok ? "ok" : "bad", escapeHTML(r.message));
 }));
 
+// Finding the game server listens for this long (the server's own default).
+const FIND_SECONDS = 11;
+
+// countdown shows on button how long listening has left, then that the
+// servers are being asked; the returned function stops it.
+function countdown(button, seconds) {
+  let left = seconds;
+  const tick = () => {
+    button.textContent = left > 0 ? "Listening… " + left + " s" : "Asking each server…";
+    left = Math.max(left - 1, 0);
+  };
+  tick();
+  const timer = setInterval(tick, 1000);
+  return () => clearInterval(timer);
+}
+
 $("testGame").addEventListener("click", (e) => busy(e.target, async () => {
   hide($("gameMsg"));
-  const r = await api("/api/test/gameserver", {
-    method: "POST",
-    body: JSON.stringify({ host: $("ozoneHost").value.trim(), port: $("ozonePort").value.trim() }),
-  });
-  show($("gameMsg"), r.ok ? "ok" : "bad", escapeHTML(r.message));
+  // With auto this listens for the announcement first, so it takes a while.
+  const host = $("ozoneHost").value.trim();
+  const stop = isAuto(host) ? countdown(e.target, FIND_SECONDS) : () => {};
+  try {
+    const r = await api("/api/test/gameserver", {
+      method: "POST",
+      body: JSON.stringify({
+        host, port: $("ozonePort").value.trim(),
+        sid: $("ozoneSid").value.trim(), arena: $("ozoneArena").value.trim(),
+      }),
+    });
+    show($("gameMsg"), r.ok ? "ok" : "bad", escapeHTML(r.message));
+  } finally {
+    stop();
+  }
 }));
+
+// Finding the game server. What it shows came off the network, where anything
+// can announce anything, so every piece of it is set as text (el), never as
+// HTML; and nothing is filled in until the operator presses a button.
+$("find").addEventListener("click", (e) => busy(e.target, async () => {
+  hide($("findMsg"));
+  $("servers").replaceChildren();
+  const stop = countdown(e.target, FIND_SECONDS);
+  try {
+    const r = await api("/api/discover", {
+      method: "POST",
+      body: JSON.stringify({ seconds: FIND_SECONDS, port: $("ozonePort").value.trim() }),
+    });
+    lastServers = Array.isArray(r.servers) ? r.servers : [];
+    renderServers(r);
+    toggles();
+  } finally {
+    stop();
+  }
+}));
+
+function el(tag, className, text) {
+  const e = document.createElement(tag);
+  if (className) e.className = className;
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+
+function action(label, primary, onClick) {
+  const b = el("button", primary ? "primary" : "", label);
+  b.type = "button";
+  b.addEventListener("click", onClick);
+  return b;
+}
+
+function renderServers(r) {
+  const box = $("servers");
+  box.replaceChildren();
+  const kind = r.ok ? "ok" : (lastServers.length ? "warn" : "bad");
+  if (r.message) show($("findMsg"), kind, escapeHTML(r.message));
+  // auto never chooses a site and arena announced from two addresses.
+  const addresses = {};
+  for (const s of lastServers) {
+    if (s.sender_ok) addresses[s.sid + "/" + s.arena] = (addresses[s.sid + "/" + s.arena] || 0) + 1;
+  }
+  for (const s of lastServers) box.append(serverCard(s, r.port, addresses[s.sid + "/" + s.arena] > 1));
+  if (r.advice) box.append(el("p", "advice", r.advice));
+  if (!r.ok) box.append(action("Listen again", false, () => $("find").click()));
+}
+
+function answerText(addr, answers, mode, error, port) {
+  return answers
+    ? addr + " answered on port " + port + " (mode " + mode + ")."
+    : addr + " did not answer on port " + port + (error ? ": " + error : ".");
+}
+
+function serverCard(s, port, conflicted) {
+  const card = el("div", "server");
+  const site = String(s.sid_raw || s.sid);
+  card.append(el("h3", "", "Site " + site + ", arena " + s.arena));
+  if (s.local) card.append(el("p", "here", "O-Zone runs on this computer."));
+  card.append(el("p", "", "Address " + s.ip + (s.sender_ok ? "" : ", but sent from " + s.sender) +
+    " · heard " + s.packets + (s.packets === 1 ? " time" : " times") +
+    (s.ozone_time_text ? " · its clock reads " + s.ozone_time_text : "")));
+  card.append(el("p", "", answerText(s.ip, s.answers, s.mode, s.answer_error, port)));
+
+  // An announcement sent from another address may name the wrong one, so use
+  // whichever answered; if neither did, the one it names, with a warning.
+  let use = s.ip, warning = "";
+  if (!s.sender_ok) {
+    card.append(el("p", "", answerText(s.sender, s.sender_answers, s.sender_mode, s.sender_answer_error, port)));
+    if (!s.answers && s.sender_answers) use = s.sender;
+    if (!s.answers && !s.sender_answers) warning = "Neither address answered, so " + s.ip + " (the address it names) was filled in. Test the connection before saving.";
+    card.append(el("p", "", "“Use this address” fills in " + use + "."));
+  }
+
+  const buttons = el("div", "buttons");
+  if (s.local) buttons.append(action("Use this computer (127.0.0.1)", true, () => useAddress("127.0.0.1", "")));
+  buttons.append(action("Use this address", !s.local, () => useAddress(use, warning)));
+  const follow = action("Follow it if its address changes", false, () => followServer(site, s.arena));
+  let why = "";
+  if (!s.sender_ok) why = "The agent only follows a server whose announcement comes from the address it names, so it would never choose this one.";
+  else if (conflicted) why = "This site and arena is announced from more than one address, so the agent would not choose between them.";
+  if (why) { follow.disabled = true; follow.title = why; }
+  buttons.append(follow);
+  card.append(buttons);
+  if (why) card.append(el("p", "", why));
+  return card;
+}
+
+function useAddress(addr, warning) {
+  $("ozoneHost").value = addr;
+  toggles();
+  show($("gameMsg"), warning ? "warn" : "ok", escapeHTML(warning || "Filled in " + addr + ". Test the connection, then save."));
+}
+
+function followServer(site, arena) {
+  $("ozoneHost").value = "auto";
+  $("ozoneSid").value = site;
+  $("ozoneArena").value = String(arena);
+  toggles();
+  show($("gameMsg"), "ok", escapeHTML("Filled in auto for site " + site + ", arena " + arena +
+    ": the agent finds this server by its announcement each time it starts. Test the connection, then save."));
+}
 
 $("testLegacy").addEventListener("click", (e) => busy(e.target, async () => {
   hide($("legacyMsg"));

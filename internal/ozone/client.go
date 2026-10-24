@@ -2,9 +2,12 @@
 package ozone
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"net/http"
 	"net/url"
 	"strings"
 	"sync"
@@ -83,13 +86,71 @@ type Client struct {
 	observer atomic.Pointer[func(map[string]any)]
 }
 
+// ErrNoHost is returned for an empty host. Dialled as given, an empty host
+// means this computer, which on a game server's own PC is the real server:
+// an address not yet chosen must never be dialled as one.
+var ErrNoHost = errors.New("no game server address")
+
 // Dial connects to the O-Zone WebSocket server.
 func Dial(host, port string) (*Client, error) {
+	if strings.TrimSpace(host) == "" {
+		return nil, ErrNoHost
+	}
 	u := url.URL{Scheme: "ws", Host: host + ":" + port, Path: "/"}
 	conn, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
 	if err != nil {
 		return nil, err
 	}
+	return newClient(conn), nil
+}
+
+// Probe connects to host, asks once for the server state and returns its
+// mode, within timeout. It sends nothing but that read-only request, never
+// touches the print server, and the reading is not the agent's: it only
+// shows that the address answers, for discovery and the setup page.
+func Probe(ctx context.Context, host, port string, timeout time.Duration) (int, error) {
+	if strings.TrimSpace(host) == "" {
+		return 0, ErrNoHost
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	d := websocket.Dialer{Proxy: http.ProxyFromEnvironment, HandshakeTimeout: timeout}
+	u := url.URL{Scheme: "ws", Host: net.JoinHostPort(host, port), Path: "/"}
+	conn, _, err := d.DialContext(ctx, u.String(), nil)
+	if err != nil {
+		return 0, err
+	}
+	c := newClient(conn)
+	defer c.Close()
+
+	type reply struct {
+		resp map[string]any
+		err  error
+	}
+	got := make(chan reply, 1)
+	go func() {
+		resp, err := c.Command("GETSERVERSTATE")
+		got <- reply{resp, err}
+	}()
+	var r reply
+	select {
+	case r = <-got:
+	case <-ctx.Done():
+		c.Close() // ends the call: its reader fails at once
+		<-got
+		return 0, ctx.Err()
+	}
+	if r.err != nil {
+		return 0, r.err
+	}
+	mode, ok := r.resp["SERVERMODE"].(float64)
+	if !ok {
+		return 0, errors.New("the reply carried no server mode")
+	}
+	return int(mode), nil
+}
+
+func newClient(conn *websocket.Conn) *Client {
 	conn.SetReadLimit(maxFrame)
 	c := &Client{
 		conn:   conn,
@@ -98,7 +159,7 @@ func Dial(host, port string) (*Client, error) {
 		dead:   make(chan struct{}),
 	}
 	go c.read()
-	return c, nil
+	return c
 }
 
 // read is the connection's only reader for its whole life. It stamps every

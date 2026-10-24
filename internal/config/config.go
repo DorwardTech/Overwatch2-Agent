@@ -8,13 +8,18 @@ import (
 	"strings"
 	"time"
 
+	"overwatch/agent/internal/ozonelib"
 	"overwatch/agent/internal/platform"
 	"overwatch/agent/internal/version"
 )
 
 // Config is the agent's runtime configuration, loaded from the environment.
 type Config struct {
+	// OzoneHost is the game server's address. OZONE_WS_HOST=auto leaves it
+	// empty and sets OzoneDiscover: the agent then chooses the address from
+	// the server's LAN announcement before it connects (see LIB).
 	OzoneHost        string
+	OzoneDiscover    bool
 	OzonePort        string
 	OzoneResultsPort string
 	ResultsEnabled   bool
@@ -70,6 +75,56 @@ type Config struct {
 	PublicDocsBase string
 
 	FailoverEnabled bool // back up cached games to central, and restore on cold start
+
+	// LIB is the LAN announcement listener's settings. LIBListener turns it on
+	// with a fixed host, where it only reports what it hears; in auto mode it
+	// always runs.
+	LIB         LIBSettings
+	LIBListener bool
+}
+
+// LIBSettings configure listening for the game server's LAN announcement.
+type LIBSettings struct {
+	Port   int     // OZONE_LIB_PORT
+	SID    *uint32 // OZONE_SID: only the server announcing this site (auto mode)
+	SIDRaw string  // OZONE_SID as written
+	Arena  *int    // OZONE_ARENA: only this arena, compared as announced (auto mode)
+}
+
+// LoadLIBSettings reads the announcement settings alone, without requiring
+// the central settings, for the discover command and the setup page.
+func LoadLIBSettings() (LIBSettings, error) {
+	l, err := libPort()
+	if err != nil {
+		return l, err
+	}
+	return l, l.loadSelectors()
+}
+
+func libPort() (LIBSettings, error) {
+	port := envInt("OZONE_LIB_PORT", ozonelib.DefaultPort)
+	if port < 1 || port > 65535 {
+		return LIBSettings{}, fmt.Errorf("OZONE_LIB_PORT=%d is not a port (1-65535)", port)
+	}
+	return LIBSettings{Port: port}, nil
+}
+
+func (l *LIBSettings) loadSelectors() error {
+	if v := strings.TrimSpace(os.Getenv("OZONE_SID")); v != "" {
+		n, raw, err := ozonelib.ParseSID(v)
+		if err != nil {
+			return fmt.Errorf("OZONE_SID: %w", err)
+		}
+		l.SID, l.SIDRaw = &n, raw
+	}
+	if v := strings.TrimSpace(os.Getenv("OZONE_ARENA")); v != "" {
+		n, err := ozonelib.ParseArena(v)
+		if err != nil {
+			return fmt.Errorf("OZONE_ARENA: %w", err)
+		}
+		l.Arena = &n
+	}
+	return nil
 }
 
 // Load reads and validates configuration. CentralURL and Token are required.
@@ -116,6 +171,8 @@ func Load() (Config, error) {
 		PublicDocsBase:  env("PUBLIC_DOCS_BASE", "https://ow2.lasertag.net.au"),
 
 		FailoverEnabled: envBool("ENABLE_CENTRAL_FAILOVER", true),
+
+		LIBListener: envBool("ENABLE_LIB_LISTENER", true),
 	}
 
 	if c.CentralURL == "" {
@@ -137,6 +194,11 @@ func Load() (Config, error) {
 			return c, fmt.Errorf("LASERTAG_URL is required in legacy mode")
 		}
 	}
+	if c.Mode != "legacy" {
+		if err := c.loadDiscovery(); err != nil {
+			return c, err
+		}
+	}
 	// Central marks an agent offline after ~30s without a push; an idle poll at
 	// or above that flaps the site "offline" between pushes.
 	if c.IdlePollInterval >= 30*time.Second {
@@ -147,6 +209,32 @@ func Load() (Config, error) {
 		c.PollInterval = time.Second
 	}
 	return c, nil
+}
+
+// loadDiscovery reads OZONE_WS_HOST=auto and the announcement settings. In
+// auto mode a malformed site or arena is an error: guessing which server was
+// meant is exactly what auto mode must never do. With a fixed host they mean
+// nothing, and a set one is said to be ignored.
+func (c *Config) loadDiscovery() error {
+	if strings.EqualFold(strings.TrimSpace(c.OzoneHost), "auto") {
+		c.OzoneDiscover, c.OzoneHost = true, ""
+	}
+	lib, err := libPort() // the report-only listener uses it too
+	if err != nil {
+		return err
+	}
+	switch err := lib.loadSelectors(); {
+	case err != nil && c.OzoneDiscover:
+		return err
+	case err != nil:
+		log.Printf("[agent] config: %v — ignored: OZONE_WS_HOST is not auto", err)
+		lib = LIBSettings{Port: lib.Port}
+	case !c.OzoneDiscover && (lib.SID != nil || lib.Arena != nil):
+		log.Print("[agent] config: OZONE_SID and OZONE_ARENA are ignored: OZONE_WS_HOST is not auto")
+		lib = LIBSettings{Port: lib.Port}
+	}
+	c.LIB = lib
+	return nil
 }
 
 // envBool parses k as a bool, warning (rather than silently defaulting) on a

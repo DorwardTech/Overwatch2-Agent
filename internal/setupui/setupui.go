@@ -29,6 +29,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -41,6 +42,7 @@ import (
 	"overwatch/agent/internal/legacy/lasertag"
 	"overwatch/agent/internal/legacy/nexus"
 	"overwatch/agent/internal/ozone"
+	"overwatch/agent/internal/ozonelib"
 	"overwatch/agent/internal/push"
 )
 
@@ -81,6 +83,14 @@ type Server struct {
 	ln   net.Listener
 	http *http.Server
 	tmpl *template.Template
+
+	// Finding the game server on the network: listening for its announcement,
+	// asking an address for its server state, and whether an address is on
+	// this computer's networks. Tests replace them.
+	scan    func(ctx context.Context, port int, d time.Duration) ([]ozonelib.Candidate, ozonelib.Counters, error)
+	probe   func(ctx context.Context, host, port string, timeout time.Duration) (int, error)
+	onLink  func(netip.Addr) bool
+	libPort int // the UDP port the announcement arrives on
 }
 
 // New prepares the page. It does not listen until Serve is called.
@@ -100,6 +110,12 @@ func New(configPath, dataDir, logPath string, svc Service) (*Server, error) {
 	if svc == nil {
 		svc = unsupportedService{}
 	}
+	// The setup command has already applied the configuration file, so a venue
+	// that moved the announcement port is listened for on its own port.
+	libPort := ozonelib.DefaultPort
+	if lib, _ := config.LoadLIBSettings(); lib.Port != 0 {
+		libPort = lib.Port
+	}
 	return &Server{
 		configPath: configPath,
 		dataDir:    dataDir,
@@ -108,6 +124,10 @@ func New(configPath, dataDir, logPath string, svc Service) (*Server, error) {
 		key:        key,
 		lastSeen:   time.Now(),
 		tmpl:       tmpl,
+		scan:       ozonelib.Scan,
+		probe:      ozone.Probe,
+		onLink:     ozonelib.OnLink,
+		libPort:    libPort,
 	}, nil
 }
 
@@ -167,6 +187,7 @@ func (s *Server) handler(done context.CancelFunc) http.Handler {
 	mux.HandleFunc("/api/test/central", s.guard(s.handleTestCentral))
 	mux.HandleFunc("/api/test/gameserver", s.guard(s.handleTestGameServer))
 	mux.HandleFunc("/api/test/legacy", s.guard(s.handleTestLegacy))
+	mux.HandleFunc("/api/discover", s.guard(s.handleDiscover))
 	mux.HandleFunc("/api/service", s.guard(s.handleService))
 	mux.HandleFunc("/api/log", s.guard(s.handleLog))
 	mux.HandleFunc("/api/finish", s.guard(func(w http.ResponseWriter, _ *http.Request) {
@@ -282,6 +303,8 @@ type settings struct {
 	Mode            string `json:"AGENT_MODE"`
 	OzoneHost       string `json:"OZONE_WS_HOST"`
 	OzonePort       string `json:"OZONE_WS_PORT"`
+	OzoneSID        string `json:"OZONE_SID"`
+	OzoneArena      string `json:"OZONE_ARENA"`
 	NexusDSN        string `json:"NEXUS_DSN"`
 	LasertagURL     string `json:"LASERTAG_URL"`
 	GameSync        string `json:"GAME_SYNC_INTERVAL"`
@@ -303,8 +326,10 @@ func (s settings) vars() []config.EnvVar {
 		{Key: "CENTRAL_API_URL", Value: s.CentralURL},
 		{Key: "AGENT_TOKEN", Value: s.Token},
 		{Key: "AGENT_MODE", Value: s.modeWord()},
-		{Key: "OZONE_WS_HOST", Value: s.OzoneHost},
+		{Key: "OZONE_WS_HOST", Value: s.hostWord()},
 		{Key: "OZONE_WS_PORT", Value: s.OzonePort},
+		{Key: "OZONE_SID", Value: strings.TrimSpace(s.OzoneSID)},
+		{Key: "OZONE_ARENA", Value: strings.TrimSpace(s.OzoneArena)},
 		{Key: "NEXUS_DSN", Value: s.NexusDSN},
 		{Key: "LASERTAG_URL", Value: s.LasertagURL},
 		{Key: "GAME_SYNC_INTERVAL", Value: s.GameSync},
@@ -355,6 +380,20 @@ func (s settings) validate() []string {
 	} else if strings.TrimSpace(s.OzoneHost) == "" {
 		problems = append(problems, "The game server address is required (127.0.0.1 if the agent runs on that machine).")
 	}
+	// The site and arena only narrow auto's choice, and the page parks them when
+	// the address is fixed. A malformed one is refused either way: with auto the
+	// agent would not start, and beside a fixed address it is junk that becomes
+	// that same failure the day the address is changed to auto.
+	if v := strings.TrimSpace(s.OzoneSID); v != "" {
+		if _, _, err := ozonelib.ParseSID(v); err != nil {
+			problems = append(problems, siteIDProblem)
+		}
+	}
+	if v := strings.TrimSpace(s.OzoneArena); v != "" {
+		if _, err := ozonelib.ParseArena(v); err != nil {
+			problems = append(problems, arenaProblem)
+		}
+	}
 	numbers := []struct{ name, value string }{
 		{"The fast poll interval", s.PollInterval},
 		{"The idle poll interval", s.IdlePoll},
@@ -386,6 +425,25 @@ func (s settings) validate() []string {
 		problems = append(problems, "The control panel needs a password as well as an address.")
 	}
 	return problems
+}
+
+const (
+	siteIDProblem = "The site ID must be a whole number of 1 to 10 digits, as Find O-Zone on the network shows it."
+	arenaProblem  = "The arena must be a number from 0 to 255, as Find O-Zone on the network shows it."
+)
+
+// isAuto reports whether a game server address is the word that has the agent
+// find the server from its announcement on the network, rather than an address
+// to dial.
+func isAuto(host string) bool { return strings.EqualFold(strings.TrimSpace(host), "auto") }
+
+// hostWord is the game server address as it gets written to the file: auto, in
+// whatever case it was typed, is written as the one word the agent reads.
+func (s settings) hostWord() string {
+	if isAuto(s.OzoneHost) {
+		return "auto"
+	}
+	return s.OzoneHost
 }
 
 // legacy reports whether the page is configuring a Nexus venue rather than an
@@ -495,6 +553,10 @@ func centralURLProblem(raw string) string {
 // The field is a bare host, because a bare host is what gets dialled. Anything
 // with a scheme or a path in it was pasted from somewhere else and would fail
 // with a confusing error much later, so say so here instead.
+//
+// "auto" passes. It is not a name to resolve but the word that turns discovery
+// on, and the test button never dials it: it listens for the announcement and
+// asks the announced address instead.
 func gameServerProblem(host, port string) string {
 	if strings.ContainsAny(host, "/\\@ \t") {
 		return `The game server address should be just the machine's name or its IP — "127.0.0.1", not a web address.`
@@ -664,8 +726,10 @@ func (s *Server) handleTestCentral(w http.ResponseWriter, r *http.Request) {
 // the one thing that must not be disturbed while a game is on.
 func (s *Server) handleTestGameServer(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		Host string `json:"host"`
-		Port string `json:"port"`
+		Host  string `json:"host"`
+		Port  string `json:"port"`
+		SID   string `json:"sid"`   // auto only: the site to choose
+		Arena string `json:"arena"` // auto only: the arena to choose
 	}
 	if err := decodeJSON(r, &in); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
@@ -680,6 +744,16 @@ func (s *Server) handleTestGameServer(w http.ResponseWriter, r *http.Request) {
 		port = "12113"
 	}
 	if problem := gameServerProblem(host, port); problem != "" {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "message": problem})
+		return
+	}
+	if isAuto(host) {
+		s.testDiscovered(w, r, port, in.SID, in.Arena)
+		return
+	}
+	// The test asks the port the agent polls, never the print server's.
+	port, problem := probePort(port)
+	if problem != "" {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "message": problem})
 		return
 	}
@@ -701,6 +775,376 @@ func (s *Server) handleTestGameServer(w http.ResponseWriter, r *http.Request) {
 		msg = fmt.Sprintf("Connected to the game server (it reports mode %v).", mode)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": msg})
+}
+
+const (
+	// discoverWindow is how long finding the game server listens unless told
+	// otherwise: two announcement periods and a margin, so every server on the
+	// network is heard and a second one is not missed.
+	discoverWindow = 11 * time.Second
+	// maxDiscoverSeconds bounds how long one press can keep the page waiting.
+	maxDiscoverSeconds = 30
+	// probeTimeout bounds each server-state request; maxProbes is how many run
+	// at once.
+	probeTimeout = 3 * time.Second
+	maxProbes    = 4
+)
+
+// testDiscovered is the game server test for auto. "auto" is never resolved or
+// dialled: the test does what the agent does when it starts — listens for the
+// announcement and chooses by the site and arena given, refusing to guess —
+// and then asks the chosen address for its server state.
+func (s *Server) testDiscovered(w http.ResponseWriter, r *http.Request, port, sidText, arenaText string) {
+	reply := func(ok bool, msg string) {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": ok, "message": msg})
+	}
+	var sel ozonelib.Selector
+	if v := strings.TrimSpace(sidText); v != "" {
+		sid, _, err := ozonelib.ParseSID(v)
+		if err != nil {
+			reply(false, siteIDProblem)
+			return
+		}
+		sel.SID = &sid
+	}
+	if v := strings.TrimSpace(arenaText); v != "" {
+		arena, err := ozonelib.ParseArena(v)
+		if err != nil {
+			reply(false, arenaProblem)
+			return
+		}
+		sel.Arena = &arena
+	}
+	port, problem := probePort(port)
+	if problem != "" {
+		reply(false, problem)
+		return
+	}
+
+	cs, _, err := s.scan(r.Context(), s.libPort, discoverWindow)
+	if err != nil {
+		reply(false, bindProblem(s.libPort, err)+" "+noServerAdvice(s.libPort))
+		return
+	}
+	res := ozonelib.SelectFrom(cs, sel)
+	switch res.Outcome {
+	case ozonelib.Selected:
+		c := res.Selected
+		mode, err := s.probe(r.Context(), c.IP.String(), port, probeTimeout)
+		if err != nil {
+			reply(false, fmt.Sprintf("Found O-Zone at %s, but it did not answer on port %s: %s", serverName(c), port, networkAdvice(err)))
+			return
+		}
+		msg := fmt.Sprintf("Found O-Zone at %s and it answered (mode %d).", serverName(c), mode)
+		if sel.SID == nil || sel.Arena == nil {
+			msg += " Fill in its site and arena so the agent never picks a different server."
+		}
+		reply(true, msg)
+	case ozonelib.Ambiguous:
+		reply(false, ambiguousMessage(res.Candidates))
+	case ozonelib.Conflict:
+		c := res.Candidates[0]
+		reply(false, fmt.Sprintf("Site %s arena %d is announced from %d addresses (%s), and the agent will not choose between them. Use Find O-Zone on the network and a fixed address instead.",
+			c.SIDRaw, c.Arena, len(res.Candidates), addresses(res.Candidates)))
+	default:
+		reply(false, noneMessage(cs, sel, s.libPort))
+	}
+}
+
+// handleDiscover listens for the game servers announcing themselves on this
+// network and asks each one for its server state, so the operator sees every
+// server, with its site and arena, and picks one. It fills nothing in: the
+// page does that only when the operator presses a button.
+func (s *Server) handleDiscover(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var in struct {
+		Seconds *int   `json:"seconds"`
+		Port    string `json:"port"` // the game server port to ask; 12113 if blank
+	}
+	if err := decodeJSON(r, &in); err != nil && !errors.Is(err, io.EOF) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	window := discoverWindow
+	if in.Seconds != nil {
+		if *in.Seconds < 1 || *in.Seconds > maxDiscoverSeconds {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": fmt.Sprintf("seconds must be between 1 and %d", maxDiscoverSeconds)})
+			return
+		}
+		window = time.Duration(*in.Seconds) * time.Second
+	}
+	port, problem := probePort(in.Port)
+	if problem != "" {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "message": problem})
+		return
+	}
+
+	cs, n, err := s.scan(r.Context(), s.libPort, window)
+	body := map[string]any{
+		"ok":         false,
+		"seconds":    int(window / time.Second),
+		"port":       port,
+		"listening":  err == nil,
+		"bind_error": "",
+		"servers":    []map[string]any{},
+		"counters": map[string]any{
+			"packets": n.Packets, "rejected": n.Rejected, "offlink": n.Offlink, "sender_mismatch": n.SenderMismatch,
+		},
+		"advice": "",
+	}
+	advice := noServerAdvice(s.libPort)
+	if n.Offlink > 0 {
+		advice += fmt.Sprintf(" Ignored %s from outside this computer's networks.", plural(int(n.Offlink), "announcement"))
+	}
+	if err != nil {
+		body["bind_error"] = err.Error()
+		body["message"] = bindProblem(s.libPort, err)
+		body["advice"] = advice
+		writeJSON(w, http.StatusOK, body)
+		return
+	}
+
+	// Each address is asked once, even when it announces two arenas. An
+	// announcement sent from an address other than the one it names has both
+	// asked, so the page can show which of them is really the server; but the
+	// address it names is only asked if it is on this computer's networks, so
+	// an announcement cannot send the page's request anywhere it likes. (A
+	// sender is always on them: the listener drops the rest.)
+	var hosts []string
+	seen := map[netip.Addr]bool{}
+	notAsked := map[string]bool{}
+	ask := func(a netip.Addr) {
+		if !seen[a] {
+			seen[a] = true
+			hosts = append(hosts, a.String())
+		}
+	}
+	for _, c := range cs {
+		if c.Usable || s.onLink(c.IP) {
+			ask(c.IP)
+		} else {
+			notAsked[c.IP.String()] = true
+		}
+		if !c.Usable {
+			ask(c.Sender)
+		}
+	}
+	answers := s.probeAll(r.Context(), hosts, port)
+	for h := range notAsked {
+		if !seen[netip.MustParseAddr(h)] {
+			answers[h] = answer{err: errOffLink}
+		}
+	}
+
+	servers := make([]map[string]any, 0, len(cs))
+	usable := 0
+	for _, c := range cs {
+		srv := map[string]any{
+			"sid": c.SID, "sid_raw": c.SIDRaw, "arena": c.Arena, "ip": c.IP.String(), "sender": c.Sender.String(),
+			"sender_ok": c.Usable, "local": local(c), "packets": c.Packets,
+			"ozone_time_text": "", "received_at": c.LastSeen.UTC().Format(time.RFC3339Nano),
+		}
+		if c.Last.HasTime {
+			srv["ozone_time_text"] = c.Last.Time.Text()
+		}
+		answers[c.IP.String()].into(srv, "")
+		if c.Usable {
+			usable++
+		} else {
+			answers[c.Sender.String()].into(srv, "sender_")
+			srv["sender_local"] = ozonelib.IsLocal(c.Sender)
+		}
+		servers = append(servers, srv)
+	}
+	body["servers"] = servers
+	switch {
+	case usable > 0:
+		body["ok"] = true
+		body["message"] = fmt.Sprintf("Heard %s. Choose one below — nothing is filled in until you press a button.", plural(len(cs), "game server"))
+	case len(cs) > 0:
+		body["message"] = "Heard only announcements sent from an address other than the one they name, which the agent never trusts for auto. An address below that answered can still be used as a fixed address."
+		body["advice"] = advice
+	default:
+		body["message"] = fmt.Sprintf("Heard no game server announcement on UDP %d in %d seconds.", s.libPort, int(window/time.Second))
+		body["advice"] = advice
+	}
+	writeJSON(w, http.StatusOK, body)
+}
+
+// local reports a server running on this computer. An announcement sent from
+// another machine can name any address, this computer's included, so it
+// counts only if it was sent from here too.
+func local(c ozonelib.Candidate) bool {
+	return ozonelib.IsLocal(c.IP) && (c.Usable || ozonelib.IsLocal(c.Sender))
+}
+
+// errOffLink is the answer recorded for an announced address that was not
+// asked because it is outside this computer's networks.
+var errOffLink = errors.New("not asked: the address is outside this computer's networks")
+
+// answer is what an address said when asked for its server state.
+type answer struct {
+	mode int
+	err  error
+}
+
+// into records the answer in a server's entry, under prefix.
+func (a answer) into(srv map[string]any, prefix string) {
+	srv[prefix+"answers"] = a.err == nil
+	srv[prefix+"mode"] = nil
+	srv[prefix+"answer_error"] = ""
+	if a.err != nil {
+		srv[prefix+"answer_error"] = networkAdvice(a.err)
+	} else {
+		srv[prefix+"mode"] = a.mode
+	}
+}
+
+// probeAll asks each host for its server state, at most maxProbes at a time,
+// and returns every host's answer.
+func (s *Server) probeAll(ctx context.Context, hosts []string, port string) map[string]answer {
+	out := make(map[string]answer, len(hosts))
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	slots := make(chan struct{}, maxProbes)
+	for _, h := range hosts {
+		slots <- struct{}{}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() { <-slots }()
+			mode, err := s.probe(ctx, h, port, probeTimeout)
+			mu.Lock()
+			out[h] = answer{mode: mode, err: err}
+			mu.Unlock()
+		}()
+	}
+	wg.Wait()
+	return out
+}
+
+// probePort checks the port a server-state request is sent to, and returns it
+// in canonical form. It refuses the print server's port: finding and testing
+// the game server only ever ask the port the agent polls, and the print server
+// must not be disturbed, least of all during a game.
+func probePort(raw string) (string, string) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		raw = "12113"
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 1 || n > 65535 {
+		return "", "The game server port must be a number between 1 and 65535."
+	}
+	results := 12123
+	if v, err := strconv.Atoi(strings.TrimSpace(os.Getenv("OZONE_RESULTS_PORT"))); err == nil {
+		results = v
+	}
+	if n == 12123 || n == results {
+		return "", fmt.Sprintf("Port %d is the game server's print server, which this page never contacts. The game server port is usually 12113.", n)
+	}
+	return strconv.Itoa(n), ""
+}
+
+func bindProblem(port int, err error) string {
+	return fmt.Sprintf("Could not listen for the game server's announcement on UDP %d (%v).", port, err)
+}
+
+// noServerAdvice is what to check when no game server was heard.
+func noServerAdvice(port int) string {
+	rule := "the installer adds the rule"
+	if port != ozonelib.DefaultPort {
+		rule = fmt.Sprintf("the installer's rule covers UDP %d only, so UDP %d needs a rule of its own", ozonelib.DefaultPort, port)
+	}
+	return fmt.Sprintf("Check that the game server is running and on the same network (subnet or VLAN) as this computer; "+
+		"on Windows, that the firewall allows the agent inbound UDP %d (%s) and the network's profile is not blocking it; "+
+		"in Docker, that the agent uses host networking, because the announcement never reaches a bridge network. "+
+		"Or type the game server's IP address instead.", port, rule)
+}
+
+// noneMessage says why no server was chosen: none heard at all, none matching
+// the site and arena given, or only announcements the agent does not trust.
+func noneMessage(cs []ozonelib.Candidate, sel ozonelib.Selector, libPort int) string {
+	var usable, untrusted []ozonelib.Candidate
+	for _, c := range cs {
+		if c.Usable {
+			usable = append(usable, c)
+		} else {
+			untrusted = append(untrusted, c)
+		}
+	}
+	switch {
+	case len(usable) > 0:
+		return fmt.Sprintf("Heard %s, but nothing for %s. Check the site and arena, or clear them.", serverNames(usable), selectorText(sel))
+	case len(untrusted) > 0:
+		reasons := make([]string, 0, len(untrusted))
+		for _, c := range untrusted {
+			reasons = append(reasons, fmt.Sprintf("site %s arena %d %s", c.SIDRaw, c.Arena, c.Reason))
+		}
+		return fmt.Sprintf("Heard only announcements sent from an address other than the one they name (%s), and the agent never trusts those. Use Find O-Zone on the network to see which address answers, and enter it as a fixed address.",
+			strings.Join(reasons, "; "))
+	default:
+		return fmt.Sprintf("Heard no game server announcement on UDP %d in %d seconds. %s", libPort, int(discoverWindow/time.Second), noServerAdvice(libPort))
+	}
+}
+
+// ambiguousMessage names the servers heard and says what tells them apart.
+func ambiguousMessage(cs []ozonelib.Candidate) string {
+	keys := map[ozonelib.Key]bool{}
+	sids := map[uint32]bool{}
+	arenas := map[int]bool{}
+	for _, c := range cs {
+		keys[c.Key], sids[c.SID], arenas[c.Arena] = true, true, true
+	}
+	choose := "a site and an arena"
+	switch {
+	case len(sids) == 1:
+		choose = "an arena"
+	case len(arenas) == 1:
+		choose = "a site"
+	}
+	return fmt.Sprintf("Heard %d servers — choose %s: %s. Fill in the site and arena, or use Find O-Zone on the network.", len(keys), choose, serverNames(cs))
+}
+
+func serverName(c ozonelib.Candidate) string {
+	return fmt.Sprintf("%s (site %s, arena %d)", c.IP, c.SIDRaw, c.Arena)
+}
+
+func serverNames(cs []ozonelib.Candidate) string {
+	names := make([]string, 0, len(cs))
+	for _, c := range cs {
+		names = append(names, serverName(c))
+	}
+	return strings.Join(names, "; ")
+}
+
+func addresses(cs []ozonelib.Candidate) string {
+	ips := make([]string, 0, len(cs))
+	for _, c := range cs {
+		ips = append(ips, c.IP.String())
+	}
+	return strings.Join(ips, ", ")
+}
+
+func selectorText(sel ozonelib.Selector) string {
+	var parts []string
+	if sel.SID != nil {
+		parts = append(parts, "site "+strconv.FormatUint(uint64(*sel.SID), 10))
+	}
+	if sel.Arena != nil {
+		parts = append(parts, "arena "+strconv.Itoa(*sel.Arena))
+	}
+	return strings.Join(parts, " ")
+}
+
+func plural(n int, noun string) string {
+	if n == 1 {
+		return "1 " + noun
+	}
+	return strconv.Itoa(n) + " " + noun + "s"
 }
 
 // handleTestLegacy is the Nexus venue's equivalent of the game server test: it

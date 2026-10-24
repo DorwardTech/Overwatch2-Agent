@@ -105,3 +105,21 @@ func waitFor(t *testing.T, cond func() bool) {
 	}
 	t.Fatal("condition not met within timeout")
 }
+
+// With no address the bus does not start, rather than dialling this computer.
+func TestRunWithoutAHostDoesNotDial(t *testing.T) {
+	c := New("", "12111", func(Event) {})
+	done := make(chan struct{})
+	go func() {
+		c.Run(context.Background())
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Run kept going with no host")
+	}
+	if c.Connected() {
+		t.Fatal("connected with no host")
+	}
+}

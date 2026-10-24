@@ -183,3 +183,25 @@ func TestDrainThenGameData(t *testing.T) {
 		t.Fatalf("expected players in payload, got: %v", data)
 	}
 }
+
+// An address not chosen yet is never dialled: empty means this computer, and
+// on a game server's own PC that is its real print server. Here a listener
+// plays that print server; nothing may reach it.
+func TestDialRefusesAnEmptyHost(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	_, port, _ := net.SplitHostPort(ln.Addr().String())
+
+	if c, err := Dial("", port, time.Second); err == nil {
+		c.Close()
+		t.Fatal("Dial(\"\") connected to this computer")
+	}
+	_ = ln.(*net.TCPListener).SetDeadline(time.Now().Add(200 * time.Millisecond))
+	if conn, err := ln.Accept(); err == nil {
+		conn.Close()
+		t.Fatal("the local print server was dialled")
+	}
+}

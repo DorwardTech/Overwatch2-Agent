@@ -97,3 +97,108 @@ func TestTheCacheDefaultsOffInTheAgent(t *testing.T) {
 		t.Error("ENABLE_MSG_BUS now defaults on")
 	}
 }
+
+func centralEnv(t *testing.T) {
+	t.Setenv("CENTRAL_API_URL", "https://ow2.example/api/agent/ingest")
+	t.Setenv("AGENT_TOKEN", "OW2_1_abc")
+}
+
+// OZONE_WS_HOST=auto, in any case, turns discovery on and leaves no host to
+// dial until one is chosen. An empty value still means this computer.
+func TestAutoHostTurnsDiscoveryOn(t *testing.T) {
+	for _, word := range []string{"auto", "AUTO", " Auto "} {
+		centralEnv(t)
+		t.Setenv("OZONE_WS_HOST", word)
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("%q: %v", word, err)
+		}
+		if !cfg.OzoneDiscover || cfg.OzoneHost != "" {
+			t.Errorf("%q: discover=%v host=%q, want discovery and no host", word, cfg.OzoneDiscover, cfg.OzoneHost)
+		}
+	}
+
+	centralEnv(t)
+	t.Setenv("OZONE_WS_HOST", "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.OzoneDiscover || cfg.OzoneHost != "127.0.0.1" {
+		t.Fatalf("empty host: discover=%v host=%q, want 127.0.0.1", cfg.OzoneDiscover, cfg.OzoneHost)
+	}
+	if cfg.LIB.Port != 12106 || !cfg.LIBListener {
+		t.Fatalf("LIB = %+v, listener %v; want port 12106 and the report-only listener on by default", cfg.LIB, cfg.LIBListener)
+	}
+}
+
+func TestAutoModeReadsTheSelectors(t *testing.T) {
+	centralEnv(t)
+	t.Setenv("OZONE_WS_HOST", "auto")
+	t.Setenv("OZONE_SID", "0068")
+	t.Setenv("OZONE_ARENA", "1")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.LIB.SID == nil || *cfg.LIB.SID != 68 || cfg.LIB.SIDRaw != "0068" || cfg.LIB.Arena == nil || *cfg.LIB.Arena != 1 {
+		t.Fatalf("LIB = %+v", cfg.LIB)
+	}
+}
+
+// In auto mode a malformed selector is an error: it would otherwise widen the
+// choice to any server heard. With a fixed host the selectors mean nothing.
+func TestBadSelectorsAreAnErrorOnlyInAutoMode(t *testing.T) {
+	for key, value := range map[string]string{"OZONE_SID": "42a", "OZONE_ARENA": "256"} {
+		centralEnv(t)
+		t.Setenv(key, value)
+		t.Setenv("OZONE_WS_HOST", "auto")
+		if _, err := Load(); err == nil {
+			t.Errorf("auto mode accepted %s=%s", key, value)
+		}
+
+		t.Setenv("OZONE_WS_HOST", "192.0.2.10")
+		cfg, err := Load()
+		if err != nil {
+			t.Errorf("a fixed host was rejected over %s=%s: %v", key, value, err)
+		}
+		if cfg.LIB.SID != nil || cfg.LIB.Arena != nil {
+			t.Errorf("a fixed host kept selectors: %+v", cfg.LIB)
+		}
+	}
+
+	centralEnv(t)
+	t.Setenv("OZONE_WS_HOST", "192.0.2.10")
+	t.Setenv("OZONE_SID", "4242")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.LIB.SID != nil || cfg.OzoneHost != "192.0.2.10" {
+		t.Fatalf("fixed host: LIB = %+v, host %q", cfg.LIB, cfg.OzoneHost)
+	}
+}
+
+func TestABadLIBPortIsAnError(t *testing.T) {
+	centralEnv(t)
+	t.Setenv("OZONE_LIB_PORT", "70000")
+	if _, err := Load(); err == nil {
+		t.Fatal("OZONE_LIB_PORT=70000 was accepted")
+	}
+}
+
+func TestLegacyModeIgnoresAuto(t *testing.T) {
+	centralEnv(t)
+	t.Setenv("AGENT_MODE", "legacy")
+	t.Setenv("NEXUS_DSN", "u:p@tcp(h:3306)/ng_system")
+	t.Setenv("LASERTAG_URL", "http://h/lasertag")
+	t.Setenv("OZONE_WS_HOST", "auto")
+	t.Setenv("OZONE_SID", "bad")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.OzoneDiscover {
+		t.Fatal("legacy mode turned discovery on")
+	}
+}

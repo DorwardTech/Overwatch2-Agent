@@ -15,8 +15,10 @@ PC itself is the usual choice; the one thing to know about that is under
   for **x64** (`amd64`, almost every PC) and **Arm64**.
 - An **administrator** account to install the service.
 - Outbound HTTPS to the central Overwatch server, and LAN access to the game
-  server. Nothing inbound is needed unless you enable the print-server proxy
-  or the control panel (see [Firewall](#firewall)).
+  server. The only inbound traffic it needs is the game server's announcement
+  on UDP `12106`, from the local subnet, which the installer allows for you.
+  The print-server proxy and the control panel need rules of their own only if
+  you enable them (see [Firewall](#firewall)).
 - The site's **agent token** — Overwatch → Sites → edit the site → *Generate
   token*.
 
@@ -36,7 +38,7 @@ PC itself is the usual choice; the one thing to know about that is under
    > release before running it:
    >
    > ```powershell
-   > Get-FileHash .\overwatch-agent_1.6.5_windows_setup.exe -Algorithm SHA256
+   > Get-FileHash .\overwatch-agent_1.7.0_windows_setup.exe -Algorithm SHA256
    > ```
 
    The installer copies the agent to `C:\Program Files\Overwatch Agent\` and
@@ -61,8 +63,22 @@ PC itself is the usual choice; the one thing to know about that is under
      venue runs **Nexus**. The choice swaps the fields underneath it, because
      the two systems are read completely differently.
      - *O-Zone*: **Game server address** — `127.0.0.1` if the agent is on the
-       game server itself, otherwise its address on the venue network. **Test
-       this connection** too.
+       game server itself, otherwise its address on the venue network. Not
+       sure of it? Press **Find O-Zone on the network**: the page listens for
+       the game server's announcement for about 11 seconds and shows a card for
+       each server it hears, with its address, site and arena. Nothing is
+       filled in until you press a button on a card:
+       - **Use this address** — the usual choice. It fills in that address,
+         exactly as if you had typed it.
+       - **Follow it if its address changes** — sets the address to `auto` and
+         fills in both the site and the arena, so the agent finds that server
+         by itself and follows it to a new address (a venue where the game
+         server's address comes from DHCP, say).
+       - A server on this computer offers **Use this computer (127.0.0.1)**
+         instead.
+
+       If it finds nothing, it says what to check and offers **Listen again**;
+       see [Troubleshooting](#troubleshooting). **Test this connection** too.
      - *Nexus*: the **Nexus database** and the **management app address**. Both
        are needed, and one **Test these connections** button checks both and
        says which one is unhappy. See [Nexus venues](#nexus-venues-legacy-mode).
@@ -95,7 +111,7 @@ the identical agent:
    check it against `SHA256SUMS.txt` from the same release:
 
    ```powershell
-   Get-FileHash .\overwatch-agent_1.6.5_windows_amd64.zip -Algorithm SHA256
+   Get-FileHash .\overwatch-agent_1.7.0_windows_amd64.zip -Algorithm SHA256
    ```
 
 2. **Extract** it to `C:\Program Files\Overwatch Agent\`. Keep the executable
@@ -120,7 +136,7 @@ The installer itself takes the usual Inno Setup switches, so a scripted rollout
 can run it unattended:
 
 ```powershell
-.\overwatch-agent_1.6.5_windows_setup.exe /VERYSILENT /NORESTART
+.\overwatch-agent_1.7.0_windows_setup.exe /VERYSILENT /NORESTART
 ```
 
 A silent install registers and configures the service but does not open the
@@ -136,7 +152,8 @@ directly if you prefer. Open it from an elevated prompt, set at least:
 |---|---|
 | `CENTRAL_API_URL` | `https://ow2.lasertag.net.au/api/agent/ingest` |
 | `AGENT_TOKEN` | the site's token, `OW2_<id>_<secret>` |
-| `OZONE_WS_HOST` | `127.0.0.1` on the game server PC, otherwise its LAN IP |
+| `OZONE_WS_HOST` | `127.0.0.1` on the game server PC, otherwise its LAN IP — or `auto` to find it from its announcement |
+| `OZONE_SID`, `OZONE_ARENA` | with `auto` only: the site and arena to follow, as **Find** or `overwatch-agent discover` shows them. Without them the agent uses the one server it hears, for that run only, and waits rather than guess when it hears more than one |
 
 For a Nexus venue, set `AGENT_MODE=legacy` with `NEXUS_DSN` and `LASERTAG_URL`
 instead of `OZONE_WS_HOST` — see [Nexus venues](#nexus-venues-legacy-mode).
@@ -235,8 +252,9 @@ than deleting them, so switching back restores what was there.
 ## Running on the game server PC
 
 When the agent runs on the same machine as the game server, everything
-default just works: `OZONE_WS_HOST=127.0.0.1`, no firewall rules, no inbound
-ports.
+default just works: `OZONE_WS_HOST=127.0.0.1`, and no firewall rules beyond the
+one the installer adds. Keep `127.0.0.1` here rather than `auto`: **Find**
+recognises a server on this computer and offers exactly that.
 
 The one exception is the optional **print-server proxy**. Its default listen
 address is port `12123`, which on the game server PC is the real print server's
@@ -254,13 +272,51 @@ moved onto the cache.
 
 ## Firewall
 
-Windows Firewall blocks inbound connections to a service unless a rule allows
-them, and the agent needs no rule for its normal work — it only makes outbound
-connections. It does listen locally on `HEALTH_ADDR` (port 8088 on every
-interface by default) for its own health check; the firewall keeps that off the
-LAN, and setting `HEALTH_ADDR=127.0.0.1:8088` in `agent.env` keeps it off the
-LAN whatever the firewall says. Add rules only for what you enable, and only
-for the venue LAN — never expose these to the internet:
+Windows Firewall blocks inbound traffic to a service unless a rule allows it.
+For its normal work the agent makes outbound connections, plus one inbound
+exception that the installer sets up for you: the game server's announcement on
+UDP `12106`.
+
+**The discovery rule.** `overwatch-agent install`, which the installer runs,
+adds an inbound rule named *Overwatch Agent - O-Zone discovery (UDP 12106)*. It
+allows UDP port `12106`, for the agent's executable only, from the local subnet
+only (`remoteip=localsubnet`), on every network profile: game networks with no
+internet access are often classed as *Public* or *Unidentified network*. The
+service, the setup page's **Find** button and `overwatch-agent discover` are the
+same executable, so the one rule covers all three when they run from the install
+folder. Reinstalling replaces the rule rather than adding a second, and
+`uninstall` removes it. If the rule cannot be added, the install still succeeds
+and prints a warning with the command to run yourself from an elevated prompt:
+
+```powershell
+netsh advfirewall firewall add rule name="Overwatch Agent - O-Zone discovery (UDP 12106)" dir=in action=allow program="C:\Program Files\Overwatch Agent\overwatch-agent.exe" protocol=UDP localport=12106 remoteip=localsubnet profile=any enable=yes
+```
+
+The graphical installer runs that step out of sight, so it shows no warning. To
+check the rule is there:
+
+```powershell
+netsh advfirewall firewall show rule name="Overwatch Agent - O-Zone discovery (UDP 12106)"
+```
+
+The rule covers port `12106` only. If you change `OZONE_LIB_PORT`, add a rule
+for that port yourself.
+
+**Sharing the port.** The agent opens UDP `12106` for shared use, so the
+service, the setup page and `discover` can all listen at once. If another
+program on this PC already holds the port without sharing it, the agent cannot
+listen: it logs that and carries on. With a fixed address nothing else changes;
+in auto mode it tries again every 30 seconds. It works the other way too: a
+program that opens UDP `12106` *after* the agent, without sharing it, fails to
+open it. If other venue software on this PC listens for the game server's
+announcement, set `ENABLE_LIB_LISTENER=false` (with a fixed address) so the
+agent leaves the port alone.
+
+It also listens locally on `HEALTH_ADDR` (port 8088 on every interface by
+default) for its own health check; the firewall keeps that off the LAN, and
+setting `HEALTH_ADDR=127.0.0.1:8088` in `agent.env` keeps it off the LAN
+whatever the firewall says. Add rules only for what you enable, and only for
+the venue LAN — never expose these to the internet:
 
 ```powershell
 # Print-server proxy, if TORN runs on another machine (use the port you chose)
@@ -297,13 +353,17 @@ prompt):
 | `.\overwatch-agent.exe restart` | apply a configuration change |
 | `.\overwatch-agent.exe version` | the version of the executable |
 | `.\overwatch-agent.exe healthcheck` | exit code 0 when the running agent answers |
+| `.\overwatch-agent.exe discover` | listen for the game server's announcement for 11 s (`--seconds N`, 1–60) and list every server heard, with its site and arena. It only listens. Exit code 0 when a usable server was heard |
 
 The service is an ordinary Windows service: *Services* (`services.msc`),
 `sc query OverwatchAgent` and `Restart-Service OverwatchAgent` work as usual.
 
 A **Reboot agent** command sent from Overwatch stops the agent gracefully;
 the service control manager restarts it a few seconds later, as it would after
-any failure. Restarts are attempted after 5 s, 15 s and then every minute.
+any failure. Restarts are attempted after 5 s, 15 s and then every minute. In
+auto mode the agent restarts itself the same way when the game server it
+follows has moved to a new address, or when the machine at its address has
+become a different game server.
 
 ## Upgrading
 
@@ -359,11 +419,15 @@ you are sure.
 - The executable is not code-signed. Windows SmartScreen may warn on first run
   of a downloaded file; verify the SHA-256 against the release's
   `SHA256SUMS.txt` and choose *Run anyway*.
-- The only port the agent opens by default is the local health endpoint
+- By default the agent opens two ports. One is the local health endpoint
   (`HEALTH_ADDR`, `:8088`), which the firewall does not expose and which
   `HEALTH_ADDR=127.0.0.1:8088` binds to the loopback address outright. The
-  proxy, the pack-IR listener and the control panel listen only when you turn
-  them on; if you do, keep them on the venue LAN as described above.
+  other is UDP `12106`, where it only listens for the game server's
+  announcement and never answers; the installer's rule admits it from the
+  local subnet only. An announcement is used only when it was sent from the
+  address it names, by a machine on a network this PC is directly connected
+  to. The proxy, the pack-IR listener and the control panel listen only when
+  you turn them on; if you do, keep them on the venue LAN as described above.
 
 ## Troubleshooting
 
@@ -391,6 +455,7 @@ a terminal.
 | site stays offline | the setup page's **Test this connection** buttons; in `agent.log` a wrong token is a `401` and a wrong host a `connect failed` |
 | the setup page will not open | it needs administrator rights — use the Start Menu entry, or run `overwatch-agent setup` from an elevated prompt |
 | proxy failed to start | port `12123` is the real print server's on this PC — set `PROXY_LISTEN_ADDR` |
+| **Find** found nothing | the firewall rule (`netsh advfirewall firewall show rule name="Overwatch Agent - O-Zone discovery (UDP 12106)"`) and the network profile (a profile set to block all incoming connections overrides the rule); whether this PC is on the same subnet and VLAN as the game server (the announcement does not cross a router); whether the game server is running. `overwatch-agent discover` runs the same check from a prompt. Typing the address in still works |
 
 ## Building from source
 

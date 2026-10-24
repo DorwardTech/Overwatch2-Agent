@@ -6,6 +6,74 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 The Site Agent and central Overwatch are versioned independently.
 
+## [1.7.0] — 2026-10-24
+
+The agent can find the game server by itself. The game server announces its
+address, site and arena on the local network every few seconds (UDP 12106).
+Set the game server address to `auto` and the agent listens, chooses the
+server it hears, and connects to it. A fixed address works as before.
+
+### Added
+
+- **Game server address `auto`.** The agent listens for at least 11
+  seconds, long enough to hear every server on the network at least twice,
+  then connects to the one it heard. It never guesses. If it hears more than
+  one site or arena, or one server announced from two addresses, it waits and
+  logs what it heard. The site and arena settings narrow the choice to one
+  server. Without them the agent uses the single server it hears, and logs
+  that it is keeping to it for this run only. If nothing is heard it keeps
+  waiting, logs the usual reasons every five minutes, and `/readyz` says
+  why it is not ready.
+- **Only announcements that can be trusted count.** An announcement must come
+  from the address it names, and from a network this machine is directly
+  connected to. Anything else is listed in reports but never chosen.
+- **One address per run.** The address is chosen once, before the agent first
+  connects, and never changes while it runs. Nothing reaches the game server
+  or the print server before the choice is made.
+- **Following a server that moves.** Suppose the chosen server stops
+  answering for a minute and announces itself from a new address, and that
+  address answers a read-only status request. Then the agent restarts and
+  connects to the new address. A server that still answers is never left. If
+  the machine at the chosen address starts announcing a different site or
+  arena, the agent also restarts and chooses again. After any restart the
+  print server stays closed until the server reports that it is between
+  games. The reason for a restart is in the log.
+- **A listener that only reports, on by default with a fixed address.** The
+  agent also listens when its address is fixed, and reports what it hears:
+  the site, the arena and the game server's own clock. It never changes the
+  address. If the port cannot be opened the agent logs that and carries on.
+  The agent opens the port for sharing. A program on the same machine that
+  opens UDP 12106 afterwards without sharing it then fails to open it.
+  `ENABLE_LIB_LISTENER=false` turns the listener off. Docker agents on a bridge
+  network hear nothing: they report that they are listening, with no
+  announcements.
+- The self-report and the local admin overview carry a `lib` block: what the
+  listener heard, what it chose, and its counters. The admin page shows the
+  address in use and when the server was last heard, and lists the servers
+  heard while the agent cannot choose.
+- **`overwatch-agent discover [--seconds N]`** lists the servers heard on the
+  network, with site, arena, address, sender and clock, and says which one
+  `auto` would choose. It only listens. In a container, run it with
+  `docker exec <agent> /agent discover`.
+- **Setup page: Find on the network.** It shows a card for each server heard,
+  and whether it answered. **Use this address** fills in the address;
+  **Follow it if its address changes** fills in `auto` with the site and
+  arena. Nothing is filled in until you press a button. **Test** works with
+  `auto` too.
+- **Windows:** the installer adds an inbound firewall rule for UDP 12106,
+  limited to the agent's program and the local subnet, and uninstalling
+  removes it. If the rule cannot be added, the install still succeeds and
+  prints the command to add it by hand.
+
+### Changed
+
+- The agent refuses to connect to an empty address. Before, it connected to
+  this machine.
+- The setup page's **Test** never sends a request to the print server's port,
+  even when that port is typed in as the game server's.
+- `/readyz` says why while the agent is not ready.
+- A health endpoint that cannot open its port is logged.
+
 ## [1.6.5] — 2026-10-24
 
 Completes 1.6.4's reply matching, which was never published: everything in it

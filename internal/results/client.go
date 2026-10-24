@@ -7,8 +7,10 @@ package results
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"time"
 
 	"overwatch/agent/internal/ozoneproto"
@@ -20,6 +22,11 @@ type Client struct {
 
 // Dial opens a TCP connection to the O-Zone results API.
 func Dial(host, port string, timeout time.Duration) (*Client, error) {
+	// An empty host would dial this computer: on a game server's own PC, its
+	// real print server. An address not yet chosen is never dialled.
+	if strings.TrimSpace(host) == "" {
+		return nil, errors.New("no game server address")
+	}
 	conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, port), timeout)
 	if err != nil {
 		return nil, err

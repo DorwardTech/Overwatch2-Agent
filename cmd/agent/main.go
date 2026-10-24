@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -41,10 +42,11 @@ import (
 //go:embed agent.env.example
 var envTemplate string
 
-// options are the flags shared by `run` and `install`.
+// options are the flags shared by `run` and `install`, and discover's own.
 type options struct {
 	configPath string // --config: the KEY=VALUE file applied at startup
 	dataDir    string // --data-dir: where the cache, buffer, log and config live
+	seconds    int    // --seconds: how long discover listens (discover only)
 }
 
 const (
@@ -59,6 +61,8 @@ Commands:
   run          run the agent (default)
   setup        open the configuration page in a browser
   healthcheck  exit 0 if the running agent's health endpoint answers
+  discover     list the game servers announcing themselves on this network
+               (only listens; connects to nothing)
   version      print the agent version
   install      install the Windows service           (Windows, elevated)
   uninstall    stop and remove the Windows service   (Windows, elevated)
@@ -67,11 +71,14 @@ Commands:
   restart      stop, then start the Windows service  (Windows, elevated)
   status       show the Windows service state
 
-Flags (run, setup, install, healthcheck):
+Flags (run, setup, install, healthcheck, discover):
   --config PATH    KEY=VALUE configuration file (default: <data-dir>\agent.env;
                    environment variables take precedence over the file)
   --data-dir PATH  data directory for the cache, buffer, log and config
                    (default: %ProgramData%\Overwatch Agent on Windows)
+
+Flags (discover only):
+  --seconds N      how long to listen, 1-60 (default 11)
 `
 
 func main() {
@@ -97,6 +104,8 @@ func main() {
 		os.Exit(runSetup(opts))
 	case "healthcheck":
 		os.Exit(healthcheck(opts))
+	case "discover":
+		os.Exit(runDiscover(opts))
 	case "version":
 		fmt.Println(version.Value)
 	case "help":
@@ -122,11 +131,19 @@ func parseArgs(args []string) (string, options, error) {
 	fs.SetOutput(io.Discard)
 	fs.StringVar(&opts.configPath, "config", "", "")
 	fs.StringVar(&opts.dataDir, "data-dir", "", "")
+	if cmd == "discover" {
+		// Defined for discover alone, so every other command rejects it as it
+		// rejects any flag it does not know.
+		fs.IntVar(&opts.seconds, "seconds", defaultDiscoverSeconds, "")
+	}
 	if err := fs.Parse(args); err != nil {
 		return cmd, opts, err
 	}
 	if fs.NArg() > 0 {
 		return cmd, opts, fmt.Errorf("unexpected argument %q", fs.Arg(0))
+	}
+	if cmd == "discover" && (opts.seconds < 1 || opts.seconds > maxDiscoverSeconds) {
+		return cmd, opts, fmt.Errorf("--seconds must be from 1 to %d, not %d", maxDiscoverSeconds, opts.seconds)
 	}
 	// A service starts in System32, so a relative path must be resolved now,
 	// while the working directory is still the operator's.
@@ -184,7 +201,19 @@ func prepareAgent(opts options, service bool) (config.Config, func(), error) {
 	if err != nil {
 		return cfg, closeLog, err
 	}
-	log.Printf("[agent] version %s · O-Zone %s:%s -> central %s", cfg.Version, cfg.OzoneHost, cfg.OzonePort, cfg.CentralURL)
+	if cfg.OzoneDiscover {
+		sid, arena := "any", "any"
+		if cfg.LIB.SID != nil {
+			sid = cfg.LIB.SIDRaw
+		}
+		if cfg.LIB.Arena != nil {
+			arena = strconv.Itoa(*cfg.LIB.Arena)
+		}
+		log.Printf("[agent] version %s · O-Zone auto (LIB udp/%d, site %s, arena %s, WS port %s) -> central %s",
+			cfg.Version, cfg.LIB.Port, sid, arena, cfg.OzonePort, cfg.CentralURL)
+	} else {
+		log.Printf("[agent] version %s · O-Zone %s:%s -> central %s", cfg.Version, cfg.OzoneHost, cfg.OzonePort, cfg.CentralURL)
+	}
 	return cfg, closeLog, nil
 }
 

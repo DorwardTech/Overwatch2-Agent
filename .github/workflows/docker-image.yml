@@ -19,6 +19,20 @@ jobs:
       contents: read
       packages: write
     steps:
+      # A release tag must be exactly vMAJOR.MINOR.PATCH. Anything else still
+      # matches 'v*' above: a mistyped "v.1.6.5" once went on to publish a
+      # mis-stamped image. Stop before anything is built or pushed. Branch
+      # pushes and manual runs on a branch skip this.
+      - name: Check the release tag
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error title=Not a release tag::Tag '$TAG' must be vMAJOR.MINOR.PATCH (for example v1.2.3). Nothing was built or pushed; delete the tag and push the right one."
+            exit 1
+          fi
+
       - uses: actions/checkout@v4
 
       # Multi-arch needs buildx. QEMU is NOT required: the Go build stage runs on
@@ -64,7 +78,7 @@ jobs:
           # Stamp the binary's reported version: the git tag's semver on a
           # tagged release, otherwise the Dockerfile's release default.
           build-args: |
-            AGENT_VERSION=${{ startsWith(github.ref, 'refs/tags/') && steps.meta.outputs.version || '1.6.5' }}
+            AGENT_VERSION=${{ startsWith(github.ref, 'refs/tags/') && steps.meta.outputs.version || '1.7.0' }}
           # Keep the manifest list clean (one entry per arch, no "unknown/unknown"
           # provenance entries that confuse some ARM runtimes / imagetools).
           provenance: false

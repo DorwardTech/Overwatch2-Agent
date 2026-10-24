@@ -15,6 +15,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -75,14 +76,25 @@ func Parse(line string) (Event, bool) {
 
 // Client is a reconnecting Message Bus consumer.
 type Client struct {
-	addr      string
+	mu        sync.Mutex
+	host      string
+	port      string
 	handler   func(Event)
 	connected atomic.Bool
 }
 
-// New creates a client that calls handler for each parsed event.
+// New creates a client that calls handler for each parsed event. host may be
+// empty when the game server's address is not known yet; SetHost then sets it
+// before Run.
 func New(host, port string, handler func(Event)) *Client {
-	return &Client{addr: net.JoinHostPort(host, port), handler: handler}
+	return &Client{host: host, port: port, handler: handler}
+}
+
+// SetHost sets the game server's address. Call it before Run.
+func (c *Client) SetHost(host string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.host = host
 }
 
 // Connected reports whether the bus is currently connected.
@@ -92,9 +104,19 @@ func (c *Client) Connected() bool { return c.connected.Load() }
 // capped exponential backoff. The bus is best-effort: failures never stop the
 // agent, they just fall back to SERVERMODE-based gating.
 func (c *Client) Run(ctx context.Context) {
+	c.mu.Lock()
+	host, port := c.host, c.port
+	c.mu.Unlock()
+	// An empty host would dial this computer, which on a game server's own PC
+	// is the real bus: an address not yet chosen is never dialled.
+	if strings.TrimSpace(host) == "" {
+		log.Print("[agent] message bus not started: no game server address")
+		return
+	}
+	addr := net.JoinHostPort(host, port)
 	backoff := time.Second
 	for ctx.Err() == nil {
-		conn, err := (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, "tcp", c.addr)
+		conn, err := (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, "tcp", addr)
 		if err != nil {
 			if !sleepCtx(ctx, backoff) {
 				return
@@ -102,7 +124,7 @@ func (c *Client) Run(ctx context.Context) {
 			backoff = nextBackoff(backoff)
 			continue
 		}
-		log.Printf("[agent] message bus connected (%s)", c.addr)
+		log.Printf("[agent] message bus connected (%s)", addr)
 		c.connected.Store(true)
 		backoff = time.Second
 		c.consume(ctx, conn)

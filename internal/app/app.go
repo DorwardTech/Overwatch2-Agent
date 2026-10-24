@@ -23,6 +23,7 @@ import (
 	"overwatch/agent/internal/health"
 	"overwatch/agent/internal/msgbus"
 	"overwatch/agent/internal/ozone"
+	"overwatch/agent/internal/ozonelib"
 	"overwatch/agent/internal/packir"
 	"overwatch/agent/internal/platform"
 	"overwatch/agent/internal/proxy"
@@ -200,6 +201,21 @@ type App struct {
 	lastPushAt      atomic.Int64         // unix nanos of the last ENQUEUED telemetry batch
 	lastPushMode    atomic.Int32         // SERVERMODE carried by that batch (see pushDue)
 
+	// ozoneHost is this process's game server address: set once, from the
+	// configuration or, in auto mode, from the announcement chosen before
+	// the first dial, and never changed (see setOzoneHost, discovery.go).
+	ozoneHost atomic.Pointer[string]
+	lib       *ozonelib.Service  // LAN announcement listener (nil if off)
+	pin       ozonelib.Candidate // the server auto mode chose (Run goroutine only)
+	pinnedAt  time.Time          // when it was chosen (Run goroutine only)
+	// restartReason is why discovery ended the run (Run goroutine only; tests
+	// read it after Run returns).
+	restartReason string
+	// Discovery timings, fields so tests can shorten them.
+	libWindow   time.Duration // listen this long before choosing
+	followAfter time.Duration // our address silent this long before following a move
+	probe       func(ctx context.Context, host, port string, timeout time.Duration) (int, error)
+
 	store  *store.Store   // local verbatim game cache (nil if disabled/unavailable)
 	cache  *cache.Cache   // O-Zone-shaped view over the store
 	bus    *msgbus.Client // External Message Bus consumer
@@ -226,6 +242,27 @@ func New(cfg config.Config) *App {
 		// because the receiver has not run yet and will see the new entry when
 		// it does. That is what lets enqueue() be non-blocking.
 		deliverSignal: make(chan struct{}, 1),
+		// Two broadcast periods and a margin: every server on the LAN is
+		// heard at least twice before one is chosen.
+		libWindow:   11 * time.Second,
+		followAfter: 60 * time.Second,
+		probe:       ozone.Probe,
+	}
+	if !cfg.OzoneDiscover {
+		a.setOzoneHost(cfg.OzoneHost)
+	}
+	// The announcement listener: always in auto mode, and by default with a
+	// fixed host too, where it only reports what it hears.
+	if cfg.OzoneDiscover || cfg.LIBListener {
+		a.lib = ozonelib.New(ozonelib.Config{
+			Port:      cfg.LIB.Port,
+			Auto:      cfg.OzoneDiscover,
+			Selector:  ozonelib.Selector{SID: cfg.LIB.SID, Arena: cfg.LIB.Arena},
+			FixedHost: cfg.OzoneHost,
+		})
+		if cfg.OzoneDiscover {
+			a.health.SetReason(a.lib.NotReadyReason)
+		}
 	}
 
 	// A volume mounted where the image keeps its state, that the agent cannot
@@ -260,7 +297,8 @@ func New(cfg config.Config) *App {
 		}
 	}
 	if cfg.MsgBusEnabled {
-		a.bus = msgbus.New(cfg.OzoneHost, cfg.OzoneMsgBusPort, a.handleBusEvent)
+		// In auto mode the address is set, and the bus started, once chosen.
+		a.bus = msgbus.New(a.ozoneAddr(), cfg.OzoneMsgBusPort, a.handleBusEvent)
 	}
 	return a
 }
@@ -314,6 +352,12 @@ func (a *App) Overview() map[string]any {
 	if a.packir != nil {
 		overview["pack_ir"] = a.packir.Status()
 	}
+	if a.lib != nil {
+		overview["lib"] = a.lib.Status()
+	}
+	// The game server's address: the configured one, or in auto mode the one
+	// chosen ("" until then).
+	overview["ozone_host"] = a.ozoneAddr()
 	return overview
 }
 
@@ -352,7 +396,15 @@ func (a *App) Run(ctx context.Context) {
 
 	go a.health.Serve(a.cfg.HealthAddr)
 
-	if a.bus != nil {
+	// With a fixed host the listener only reports; a port it cannot bind is
+	// logged and changes nothing.
+	if a.lib != nil && !a.cfg.OzoneDiscover {
+		if err := a.lib.Start(ctx); err != nil {
+			log.Printf("[agent] LIB: not listening for the game server's announcement on UDP %d: %v (reporting only; nothing else changes)", a.lib.Port(), err)
+		}
+	}
+	// In auto mode the bus starts once the address is chosen (awaitOzone).
+	if a.bus != nil && !a.cfg.OzoneDiscover {
 		go a.bus.Run(ctx)
 	}
 	if a.store != nil {
@@ -397,9 +449,17 @@ func (a *App) Run(ctx context.Context) {
 	// already buffered still deserves delivering while O-Zone is unreachable.
 	go a.deliverLoop(ctx)
 
+	if a.cfg.OzoneDiscover && !a.awaitOzone(ctx) {
+		return
+	}
+
 	backoff := time.Second
 	for ctx.Err() == nil {
-		client, err := ozone.Dial(a.cfg.OzoneHost, a.cfg.OzonePort)
+		if a.maybeFollow(ctx) {
+			return
+		}
+		host := a.ozoneAddr()
+		client, err := ozone.Dial(host, a.cfg.OzonePort)
 		if err != nil {
 			log.Printf("[agent] O-Zone connect failed: %v (retry in %s)", err, backoff)
 			if !sleepCtx(ctx, backoff) {
@@ -409,7 +469,7 @@ func (a *App) Run(ctx context.Context) {
 			continue
 		}
 
-		log.Printf("[agent] connected to O-Zone ws://%s:%s", a.cfg.OzoneHost, a.cfg.OzonePort)
+		log.Printf("[agent] connected to O-Zone ws://%s:%s", host, a.cfg.OzonePort)
 		backoff = time.Second
 		a.pollLoop(ctx, client)
 		client.Close()
@@ -446,6 +506,9 @@ func (a *App) pollLoop(ctx context.Context, client *ozone.Client) {
 			}
 			if a.store != nil {
 				go a.refreshCache()
+			}
+			if a.identityLost() {
+				return false
 			}
 		}
 		a.health.MarkPoll()
@@ -693,6 +756,9 @@ func (a *App) collect(client *ozone.Client, slow bool) ([]byte, string, error) {
 			"commands":         a.cfg.CommandsEnabled,
 			"results_pending":  pending,
 			"results_given_up": givenUp,
+		}
+		if a.lib != nil {
+			payload["agent"].(map[string]any)["lib"] = a.lib.Report()
 		}
 	}
 
@@ -970,10 +1036,16 @@ func (s *resultsSession) connect() (*results.Client, error) {
 	if s.conn != nil {
 		return s.conn, nil
 	}
+	// The address is read once, before the gate: no address yet (auto mode
+	// still choosing) is "not now", like a stale reading.
+	host := s.app.ozoneAddr()
+	if host == "" {
+		return nil, errLinkStale
+	}
 	if err := s.app.printServerGate(); err != nil {
 		return nil, err
 	}
-	rc, err := results.Dial(s.app.cfg.OzoneHost, s.app.cfg.OzoneResultsPort, 5*time.Second)
+	rc, err := results.Dial(host, s.app.cfg.OzoneResultsPort, 5*time.Second)
 	if err != nil {
 		return nil, err
 	}
