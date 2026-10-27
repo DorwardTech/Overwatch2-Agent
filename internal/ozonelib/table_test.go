@@ -77,6 +77,23 @@ func TestSelectForgetsAServerAfterTheTTL(t *testing.T) {
 	}
 }
 
+// A server heard again after a silence longer than the TTL starts afresh: one
+// new announcement is not "heard twice" on the strength of old ones.
+func TestALapsedEntryStartsAfresh(t *testing.T) {
+	tb, c := newTestTable()
+	p := pkt("192.0.2.20", 4242, 1)
+	hear(tb, c, p, 3)
+	c.advance(entryTTL + time.Second)
+	hear(tb, c, p, 1)
+	cs := tb.Candidates()
+	if len(cs) != 1 || cs[0].Packets != 1 || !cs[0].FirstSeen.Equal(c.now()) {
+		t.Fatalf("Candidates() = %+v, want one fresh entry", cs)
+	}
+	if _, ok := tb.Moved(Key{4242, 1}, netip.MustParseAddr("192.0.2.10")); ok {
+		t.Fatal("moved on a single announcement after a silence")
+	}
+}
+
 // A packet naming an address it was not sent from is listed and counted, but
 // never chosen, and never spoils the genuine server's entry.
 func TestASenderMismatchIsNeverChosen(t *testing.T) {

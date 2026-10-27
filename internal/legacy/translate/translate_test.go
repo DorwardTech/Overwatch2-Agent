@@ -61,6 +61,38 @@ func TestTelemetryPayloadOmitsUnavailableMetrics(t *testing.T) {
 	}
 }
 
+// Central reads GAMETIME as the seconds left in the game (the live view's "Time
+// left"). Nexus reports the seconds elapsed, so the agent sends the game's
+// length less the time elapsed, never below 0, and 0 when Nexus does not say
+// how long the game is.
+func TestGameTimeIsTheTimeRemaining(t *testing.T) {
+	cases := []struct {
+		name              string
+		elapsed, duration int
+		want              int
+	}{
+		{"under way", 10, 600, 590},
+		{"just started", 0, 720, 720},
+		{"at the end", 720, 720, 0},
+		{"overrun", 735, 720, 0},
+		{"length unknown", 42, 0, 0},
+		{"idle", 0, 0, 0},
+		{"negative elapsed", -5, 600, 600},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			status := lasertag.ServerStatus{ServerMode: 3, GameID: 42, Elapsed: c.elapsed, Duration: c.duration}
+			if got := TimeRemaining(status); got != c.want {
+				t.Fatalf("TimeRemaining(elapsed %d, duration %d) = %d, want %d", c.elapsed, c.duration, got, c.want)
+			}
+			srv := TelemetryPayload(1, time.Unix(1700000000, 0), nil, status, nil)["server_state"].(map[string]any)
+			if srv["GAMETIME"] != c.want || srv["GAMEDURATION"] != c.duration {
+				t.Fatalf("server_state GAMETIME=%v GAMEDURATION=%v, want %d and %d", srv["GAMETIME"], srv["GAMEDURATION"], c.want, c.duration)
+			}
+		})
+	}
+}
+
 func TestGameResultsPayloadShapeMatchesAnalyzer(t *testing.T) {
 	// Player 1: dealt weapon+front tags, received a back tag, logged-in member.
 	players := []PlayerAgg{

@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,6 +19,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"overwatch/agent/internal/config"
+	"overwatch/agent/internal/msgbus"
 	"overwatch/agent/internal/ozonelib"
 	"overwatch/agent/internal/ozonesim"
 )
@@ -454,5 +457,233 @@ func TestAFixedHostRunsWhenTheListenerCannotBind(t *testing.T) {
 	waitUntil(t, "the configured server", 3*time.Second, func() bool { return ws.conns.Load() > 0 })
 	if r := a.lib.Report(); r["state"] != "bind_failed" {
 		t.Skipf("this platform shared a port held without reuse (state %v)", r["state"])
+	}
+}
+
+// logCapture collects what the standard logger writes during a test.
+type logCapture struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (l *logCapture) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.Write(p)
+}
+
+func (l *logCapture) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.String()
+}
+
+func captureLog(t *testing.T) *logCapture {
+	t.Helper()
+	l := &logCapture{}
+	prev := log.Writer()
+	log.SetOutput(l)
+	t.Cleanup(func() { log.SetOutput(prev) })
+	return l
+}
+
+// A selector that matches none of the servers heard: the agent says which
+// servers it heard, in the words /readyz uses, once rather than on every look,
+// and without the advice about host networking (the network plainly works).
+// The self-report's state stays "waiting".
+func TestAutoModeLogsWhatItHeardWhenNothingMatches(t *testing.T) {
+	logs := captureLog(t)
+	ws := newFakeOzoneWS(t, 1)
+	cfg := autoConfig(ws.port)
+	arena := 1
+	cfg.LIB.Arena = &arena
+	a := discoveryApp(t, cfg, 0)
+	runApp(t, a)
+
+	announcer(t, a, "127.0.0.1", ozonesim.LIBAnnouncement{IP: "127.0.0.1", Arena: 0, SID: "0564"})
+	want := "heard site 0564 arena 0 at 127.0.0.1, but OZONE_ARENA=1 selects no server"
+	waitUntil(t, "the log line", 3*time.Second, func() bool { return strings.Contains(logs.String(), want) })
+	time.Sleep(3 * a.libWindow) // many more looks, and many more announcements
+	out := logs.String()
+	if n := strings.Count(out, want); n != 1 {
+		t.Fatalf("logged %d times, want once:\n%s", n, out)
+	}
+	if strings.Contains(out, "host networking") {
+		t.Fatalf("advised on networking although a server was heard:\n%s", out)
+	}
+	if got := a.lib.NotReadyReason(); got != want {
+		t.Fatalf("NotReadyReason() = %q, want %q", got, want)
+	}
+	if ws.conns.Load() != 0 || a.ozoneAddr() != "" {
+		t.Fatalf("connected (%d) to %q with no server matching", ws.conns.Load(), a.ozoneAddr())
+	}
+	r := a.lib.Report()
+	if r["state"] != "waiting" {
+		t.Fatalf("state = %v, want waiting", r["state"])
+	}
+	if _, ok := r["wait_reason"]; ok {
+		t.Fatal("the self-report gained a field in a patch release")
+	}
+}
+
+// otherServerAtOurAddress builds an auto-mode agent that chose site 4242
+// arena 1 at 127.0.0.1, whose address now announces site 5555 arena 0, with
+// everything that could reach the print server lined up and the gate open: a
+// fresh, settled idle reading, a finished game's work left pending, a game
+// queued, a cache to refresh, and a central with a results command waiting.
+func otherServerAtOurAddress(t *testing.T) (a *App, ps *ozonesim.PrintServer, commandFetches *atomic.Int32, stopped *atomic.Bool) {
+	t.Helper()
+	ps = ozonesim.NewPrintServer()
+	if err := ps.Start(0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ps.Close() })
+	ps.SetList([]byte(`{"gamelist":[{"gamenum":9,"gamename":"g9","duration":601,` +
+		`"starttime":"s","endtime":"e","playercount":2,"valid":1}]}`))
+	_, psPort, _ := net.SplitHostPort(ps.Addr())
+
+	commandFetches = &atomic.Int32{}
+	central := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/commands") {
+			commandFetches.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"commands":[{"id":1,"type":"refetch_game","payload":{"game_number":9}}]}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(central.Close)
+
+	cfg := autoConfig("1")
+	cfg.CentralURL = central.URL + "/api/agent/ingest"
+	cfg.OzoneResultsPort, cfg.ResultsHandshake = psPort, 2
+	cfg.ResultsEnabled, cfg.CommandsEnabled = true, true
+	cfg.CacheEnabled, cfg.CacheDir = true, t.TempDir()
+	a = discoveryApp(t, cfg, 300*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	if err := a.lib.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(a.lib.Close)
+	a.setOzoneHost("127.0.0.1")
+	a.pin = ozonelib.Candidate{Key: ozonelib.Key{SID: 4242, Arena: 1}, IP: netip.MustParseAddr("127.0.0.1"), SIDRaw: "4242"}
+	a.pinnedAt = time.Now()
+	stopped = &atomic.Bool{}
+	a.stopRun = func() { stopped.Store(true) }
+
+	a.noteServerMode(1)
+	a.gameState.Store(stateIdle)
+	a.finishPending.Store(true)
+	a.queueFetch(8)
+	if a.printServerGate() != nil {
+		t.Fatalf("gate = %v; the test needs it open", a.printServerGate())
+	}
+
+	announcer(t, a, "127.0.0.1", ozonesim.LIBAnnouncement{IP: "127.0.0.1", Arena: 0, SID: "5555"})
+	waitUntil(t, "the other server to be heard twice", 3*time.Second, func() bool {
+		return a.lib.IdentityLost(a.pin.Key, a.pin.IP)
+	})
+	return a, ps, commandFetches, stopped
+}
+
+// The machine at our address has become another game server. The very next
+// poll notices, as soon as it has the server state, and before anything acts
+// on it: nothing reaches that machine's print server (no results drain, no
+// finish work, no command, no cache refresh), no payload is queued for
+// central, the gate closes, and the run ends to choose again.
+func TestAnotherServerAtOurAddressIsNotPushed(t *testing.T) {
+	a, ps, commandFetches, stopped := otherServerAtOurAddress(t)
+	client := scriptedOZone(t, func(cmd string, n int) ([]map[string]any, bool) {
+		switch cmd {
+		case "GETSERVERSTATE": // its game 9 has finished: a fetch, if it were ours
+			return []map[string]any{{"CMD": cmd, "SERVERMODE": 7, "GAMENUM": 9}}, false
+		case "GETACTIVEPACKS":
+			return []map[string]any{packsReply()}, false
+		}
+		return []map[string]any{{"CMD": cmd}}, false
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		a.pollLoop(ctx, client) // the first poll is a slow one: commands and a cache refresh too
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the poll loop carried on polling another game server")
+	}
+
+	time.Sleep(300 * time.Millisecond) // anything started would have dialled by now
+	if n := ps.Connections(); n != 0 {
+		t.Fatalf("the other server's print server was contacted %d time(s)", n)
+	}
+	if n := commandFetches.Load(); n != 0 {
+		t.Fatalf("commands were fetched %d time(s) on the other server's reading", n)
+	}
+	if n := a.buf.Len(); n != 0 {
+		t.Fatalf("%d payload(s) from the other server queued for central", n)
+	}
+	if !stopped.Load() || !strings.Contains(a.restartReason, "no longer site 4242 arena 1") {
+		t.Fatalf("restart: stopped=%v reason=%q", stopped.Load(), a.restartReason)
+	}
+	if a.printServerGate() == nil {
+		t.Fatal("the print-server gate stayed open")
+	}
+	a.mu.Lock()
+	_, queued := a.pendingFetch[9]
+	a.mu.Unlock()
+	if queued || a.lastGameNum != 0 || a.serverMode.Load() != 1 {
+		t.Fatalf("the other server's reading was used: game 9 queued=%v, lastGameNum=%d, serverMode=%d", queued, a.lastGameNum, a.serverMode.Load())
+	}
+}
+
+// A message-bus GAME_FINISH from the machine at our address, once that has
+// become another game server, is not our server's finish: it queues nothing
+// and starts no finish work.
+func TestABusFinishFromAnotherServerStartsNothing(t *testing.T) {
+	a, ps, _, _ := otherServerAtOurAddress(t)
+	a.mu.Lock()
+	a.lastBusGame = 9
+	a.mu.Unlock()
+
+	a.handleBusEvent(msgbus.Event{Code: msgbus.EventGameFinish})
+
+	time.Sleep(300 * time.Millisecond) // finish work, if started, would have dialled by now
+	if n := ps.Connections(); n != 0 {
+		t.Fatalf("the other server's print server was contacted %d time(s)", n)
+	}
+	a.mu.Lock()
+	_, queued := a.pendingFetch[9]
+	a.mu.Unlock()
+	if queued {
+		t.Fatal("the other server's finished game was queued")
+	}
+	if a.gameState.Load() != stateIdle {
+		t.Fatalf("game state = %d: the other server's finish was acted on", a.gameState.Load())
+	}
+}
+
+// Between polls the machine at our address becomes another game server. The
+// gate closes the moment the announcements tell the two apart, not at the
+// next poll: an admin Resync, a finish timer, or a drain already running
+// reaches only for our own server's print server.
+func TestTheGateClosesAsSoonAsAnotherServerIsHeard(t *testing.T) {
+	a, ps, _, _ := otherServerAtOurAddress(t) // no poll since the switch
+
+	if err := a.printServerGate(); !errors.Is(err, errPollUnsettled) {
+		t.Fatalf("gate = %v, want errPollUnsettled once our address is another server", err)
+	}
+	if a.safeForPrintServer(int(a.serverMode.Load())) {
+		t.Fatal("safeForPrintServer still says yes")
+	}
+	a.refreshCache() // what Resync runs
+	a.finishWork()   // what a finish timer runs: a queued game and finish work are pending
+	time.Sleep(300 * time.Millisecond)
+	if n := ps.Connections(); n != 0 {
+		t.Fatalf("the other server's print server was contacted %d time(s) between polls", n)
 	}
 }

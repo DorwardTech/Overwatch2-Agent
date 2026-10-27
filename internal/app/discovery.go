@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log"
 	"net/netip"
-	"strings"
 	"time"
 
 	"overwatch/agent/internal/ozonelib"
@@ -38,38 +37,35 @@ func (a *App) ozoneAddr() string {
 	return ""
 }
 
-// awaitOzone listens for announcements until exactly one game server is heard
-// and libWindow has passed, then makes it this process's server. It returns
-// false if ctx ends first. Nothing can reach the print server meanwhile:
-// there is no address to dial and no server-state reading.
+// awaitOzone listens for announcements until one game server has been the
+// only one heard for libWindow, and libWindow has passed since it started
+// listening (see ozonelib.Service.Wait), then makes it this process's server.
+// It returns false if ctx ends first. Nothing can reach the print server
+// meanwhile: there is no address to dial and no server-state reading.
+//
+// Once the window has passed, it logs what it has heard, in the words /readyz
+// uses: a selector that matches none of the servers heard, announcements it
+// will not trust, one server at two addresses, several servers, or nothing at
+// all (only that gets the networking advice). Each text is logged when it
+// changes, and again every five minutes while it stands.
 func (a *App) awaitOzone(ctx context.Context) bool {
 	if err := a.lib.Start(ctx); err != nil {
 		log.Printf("[agent] O-Zone discovery: cannot listen on UDP %d: %v — set OZONE_WS_HOST to the game server's IP", a.lib.Port(), err)
 	}
-	var loggedNone time.Time
-	var loggedSet string
+	var logged string
+	var loggedAt time.Time
 	c, ok := a.lib.Wait(ctx, a.libWindow, func(r ozonelib.Result, windowDone bool) {
-		if !windowDone {
+		// A lone server is being confirmed: it is chosen, or the reason
+		// changes, within a window.
+		if !windowDone || r.Outcome == ozonelib.Selected {
 			return
 		}
-		port := a.lib.Port()
-		switch r.Outcome {
-		case ozonelib.None:
-			if loggedNone.IsZero() || time.Since(loggedNone) >= 5*time.Minute {
-				loggedNone = time.Now()
-				log.Printf("[agent] O-Zone discovery: no game server announcement heard on UDP %d — in Docker this needs host networking; on Windows allow inbound UDP %d; or set OZONE_WS_HOST to the game server's IP", port, port)
-			}
-		case ozonelib.Ambiguous, ozonelib.Conflict:
-			names := make([]string, 0, len(r.Candidates))
-			for _, c := range r.Candidates {
-				names = append(names, ozonelib.Describe(c))
-			}
-			set := strings.Join(names, "; ")
-			if set != loggedSet {
-				loggedSet = set
-				log.Printf("[agent] O-Zone discovery: %s, not choosing between %s — set OZONE_SID and OZONE_ARENA", r.Outcome, set)
-			}
+		text := a.lib.NotReadyReason()
+		if text == "" || (text == logged && time.Since(loggedAt) < 5*time.Minute) {
+			return
 		}
+		logged, loggedAt = text, time.Now()
+		log.Printf("[agent] O-Zone discovery: %s", text)
 	})
 	if !ok {
 		return false
@@ -101,11 +97,13 @@ func (a *App) maybeFollow(ctx context.Context) bool {
 	if a.lib == nil || !a.cfg.OzoneDiscover || a.pinnedAt.IsZero() {
 		return false
 	}
-	last := a.pinnedAt
-	if at := a.serverModeAt.Load(); at != 0 && time.Unix(0, at).After(last) {
-		last = time.Unix(0, at)
+	// Both measured on the monotonic clock, so a step of the wall clock can
+	// neither make our address look silent nor hide that it is.
+	silent := time.Since(a.pinnedAt)
+	if age, ok := a.serverModeAge(); ok && age < silent {
+		silent = age
 	}
-	if time.Since(last) < a.followAfter {
+	if silent < a.followAfter {
 		return false
 	}
 	current, err := netip.ParseAddr(a.ozoneAddr())
@@ -125,27 +123,52 @@ func (a *App) maybeFollow(ctx context.Context) bool {
 	return true
 }
 
-// identityLost restarts the process when the machine at our address has
-// become a different game server (a DHCP lease handed on, say), which
-// maybeFollow cannot see because that machine still answers.
-func (a *App) identityLost() bool {
+// identityChanged reports whether the machine at our address has become a
+// different game server (a DHCP lease handed on, say): it announces, usably
+// and at least twice, a site or arena other than the one chosen, and the
+// chosen one has not been heard there within an entry's lifetime (see
+// ozonelib.Table.IdentityLost). Only auto mode asks: with a fixed host it is
+// false at once and reads nothing, so a fixed-host agent behaves as before.
+//
+// It reads the chosen server, which awaitOzone sets before the message bus
+// starts and nothing changes after, so the bus goroutine may ask too.
+func (a *App) identityChanged() (reason string, lost bool) {
 	if a.lib == nil || !a.cfg.OzoneDiscover || a.pinnedAt.IsZero() {
-		return false
+		return "", false
 	}
 	current, err := netip.ParseAddr(a.ozoneAddr())
 	if err != nil || !a.lib.IdentityLost(a.pin.Key, current) {
+		return "", false
+	}
+	return fmt.Sprintf("O-Zone at %s is no longer site %s arena %d", current, a.pin.SIDRaw, a.pin.Arena), true
+}
+
+// identityLost restarts the process when the machine at our address has
+// become a different game server, which maybeFollow cannot see because that
+// machine still answers. collect asks on every poll, as soon as it has the
+// server state and before anything uses it or starts on the strength of it.
+// It closes the print-server gate first: work that an earlier poll started
+// re-checks the gate before each fetch, and the print server at our address
+// is now another server's. Run goroutine only.
+func (a *App) identityLost() bool {
+	reason, lost := a.identityChanged()
+	if !lost {
 		return false
 	}
-	reason := fmt.Sprintf("O-Zone at %s is no longer site %s arena %d", current, a.pin.SIDRaw, a.pin.Arena)
+	a.pollUnsettled.Store(true)
 	log.Printf("[agent] %s; restarting to choose again", reason)
 	a.restartFor(reason)
 	return true
 }
 
 // restartFor ends the run so the process restarts, as reboot_agent does. The
-// reason is logged by the caller; no self-report follows (none is sent while
-// the server is unreachable, and a poll that finds our address has become
-// another server is dropped), so it is not reported.
+// reason is logged by the caller and not reported to central. maybeFollow
+// restarts only after our address has stopped answering, so no poll, and no
+// self-report, has run for a while. identityLost runs inside collect, which
+// drops the poll that notices: it is not pushed, and starts no print-server
+// work and no commands. The polls before it are pushed as usual: until the
+// chosen server's last announcement lapses (up to 30 s after it stops) there
+// is nothing to tell the two machines apart by.
 func (a *App) restartFor(reason string) {
 	a.restartReason = reason
 	if a.stopRun != nil {

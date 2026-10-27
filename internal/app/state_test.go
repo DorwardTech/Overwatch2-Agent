@@ -67,7 +67,7 @@ func TestSafeForPrintServerRequiresACurrentReading(t *testing.T) {
 	}
 
 	// The same reading, now older than the bound, closes it again.
-	a.serverModeAt.Store(time.Now().Add(-maxServerModeAge - time.Second).UnixNano())
+	ageServerMode(a, maxServerModeAge+time.Second)
 	if a.safeForPrintServer(1) {
 		t.Error("a stale idle reading must not open the gate")
 	}
@@ -80,6 +80,93 @@ func TestSafeForPrintServerRequiresACurrentReading(t *testing.T) {
 	a.gameState.Store(stateActive)
 	if !errors.Is(a.printServerGate(), errGameActive) {
 		t.Errorf("gate = %v, want errGameActive during a game", a.printServerGate())
+	}
+}
+
+// ageServerMode makes the last SERVERMODE reading d old, on the clock the gate
+// measures it with.
+func ageServerMode(a *App, d time.Duration) {
+	at := int64(a.monoNow() - d)
+	if at == 0 {
+		at = -1 // 0 means "never read"
+	}
+	a.serverModeAt.Store(at)
+}
+
+// The reading's age is measured on the monotonic clock. Timed by the wall
+// clock, a step back (NTP correcting a clock that ran fast, a virtual machine
+// resuming) made a reading from before an outage look current again, and the
+// gate could open on an idle that was only the last thing the agent saw.
+func TestServerModeFreshnessIgnoresAWallClockStep(t *testing.T) {
+	elapsed := time.Hour
+	a := &App{mono: func() time.Duration { return elapsed }}
+	a.gameState.Store(stateIdle)
+	a.noteServerMode(1)
+	if err := a.printServerGate(); err != nil {
+		t.Fatalf("gate = %v on a current idle reading", err)
+	}
+
+	// The link goes quiet past the bound. Whatever the wall clock does in
+	// the meantime, stepped back by an hour, say, the reading has aged on
+	// the monotonic clock, and that is the only clock the gate reads.
+	elapsed += maxServerModeAge + time.Second
+	if a.serverModeFresh() || !errors.Is(a.printServerGate(), errLinkStale) {
+		t.Fatalf("a reading %s old opened the gate (fresh=%v, gate=%v)", maxServerModeAge+time.Second, a.serverModeFresh(), a.printServerGate())
+	}
+	if age, ok := a.serverModeAge(); !ok || age != maxServerModeAge+time.Second {
+		t.Fatalf("serverModeAge() = %s, %v", age, ok)
+	}
+
+	// On the real clock, a reading is stored as an offset on the monotonic
+	// clock from this process's start, not as a wall-clock time: there is
+	// nothing in it for a step of the wall clock to move.
+	b := &App{}
+	before := time.Since(monoEpoch)
+	b.noteServerMode(1)
+	if at := time.Duration(b.serverModeAt.Load()); at < before || at > time.Since(monoEpoch) {
+		t.Fatalf("reading stored as %d, want a monotonic offset between %d and now", at, before)
+	}
+	if !b.serverModeFresh() {
+		t.Fatal("a reading just taken is not fresh")
+	}
+}
+
+// Linux's monotonic clock stops while the host is suspended. A reading taken
+// before a suspend must not count as current after it: the wall clock saw the
+// time pass, and O-Zone (a separate appliance) may have started a game. A
+// wall clock stepped back, though, only makes a reading look younger there,
+// and the monotonic clock still decides.
+func TestServerModeFreshnessNoticesAHostSuspend(t *testing.T) {
+	elapsed := time.Hour
+	wall := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
+	a := &App{mono: func() time.Duration { return elapsed }, wall: func() time.Time { return wall }}
+	a.gameState.Store(stateIdle)
+	a.noteServerMode(1)
+	if err := a.printServerGate(); err != nil {
+		t.Fatalf("gate = %v on a current idle reading", err)
+	}
+
+	// Suspended for 20 minutes: the monotonic clock moved 5 s, the wall clock 20 min.
+	elapsed += 5 * time.Second
+	wall = wall.Add(20 * time.Minute)
+	if a.serverModeFresh() || !errors.Is(a.printServerGate(), errLinkStale) {
+		t.Fatalf("a reading from before a 20-minute suspend opened the gate (fresh=%v, gate=%v)", a.serverModeFresh(), a.printServerGate())
+	}
+
+	// The next poll's reading is current on both clocks again.
+	a.noteServerMode(1)
+	if !a.serverModeFresh() {
+		t.Fatal("a reading just taken after the resume is not fresh")
+	}
+
+	// The wall clock is stepped back an hour: the monotonic clock decides.
+	wall = wall.Add(-time.Hour)
+	if !a.serverModeFresh() {
+		t.Fatal("a wall clock stepped back made a current reading stale")
+	}
+	elapsed += maxServerModeAge + time.Second
+	if a.serverModeFresh() {
+		t.Fatal("a reading old on the monotonic clock looked fresh after the wall clock went back")
 	}
 }
 
@@ -273,7 +360,7 @@ func TestRefreshCacheRefusesOnAStaleLink(t *testing.T) {
 	})
 	a.noteServerMode(1) // idle...
 	a.gameState.Store(stateIdle)
-	a.serverModeAt.Store(time.Now().Add(-maxServerModeAge - time.Second).UnixNano()) // ...as of a while ago
+	ageServerMode(a, maxServerModeAge+time.Second) // ...as of a while ago
 
 	a.refreshCache()
 

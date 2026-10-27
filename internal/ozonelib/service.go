@@ -6,7 +6,9 @@ import (
 	"log"
 	"net"
 	"net/netip"
+	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -22,6 +24,10 @@ type Config struct {
 	// TTL is how long a server stays known after its last announcement
 	// (default 30s). Tests shorten it.
 	TTL time.Duration
+
+	// now replaces the clock, and tick Wait's polling period (tests only).
+	now  func() time.Time
+	tick time.Duration
 }
 
 // retryBind is how often auto mode retries a port it could not bind.
@@ -30,12 +36,16 @@ const retryBind = 30 * time.Second
 // maxReported bounds the candidates a report lists.
 const maxReported = 8
 
+// maxListed bounds the servers a not-ready reason names.
+const maxListed = 4
+
 // Service listens for announcements for the life of the process and answers
 // what it has heard. It is safe for concurrent use.
 type Service struct {
 	cfg   Config
 	table *Table
 	links *linkCache
+	now   func() time.Time
 
 	mu          sync.Mutex
 	conn        net.PacketConn
@@ -47,15 +57,24 @@ type Service struct {
 	selected    *Candidate
 	selectedAt  time.Time
 	loggedOther string // the other server last logged in report-only mode
+	// waiting is set once Wait has been called, with the listening window it
+	// was given, so a not-ready reason can tell "nothing heard yet" from
+	// "nothing heard all window".
+	waiting bool
+	window  time.Duration
 }
 
 // New returns a service that has not started listening.
 func New(cfg Config) *Service {
-	t := NewTable(time.Now)
+	now := cfg.now
+	if now == nil {
+		now = time.Now
+	}
+	t := NewTable(now)
 	if cfg.TTL > 0 {
 		t.ttl = cfg.TTL
 	}
-	return &Service{cfg: cfg, table: t, links: newLinkCache(), port: cfg.Port}
+	return &Service{cfg: cfg, table: t, links: newLinkCache(), now: now, port: cfg.Port}
 }
 
 // Start binds the port and starts reading. A failure is returned and kept for
@@ -88,7 +107,7 @@ func (s *Service) bind(ctx context.Context) error {
 		s.bindErr = err.Error()
 		return err
 	}
-	s.conn, s.bindErr, s.listenedAt = conn, "", time.Now()
+	s.conn, s.bindErr, s.listenedAt = conn, "", s.now()
 	if u, ok := conn.LocalAddr().(*net.UDPAddr); ok {
 		s.port = u.Port
 	}
@@ -142,19 +161,33 @@ func (s *Service) Select() Result { return s.table.Select(s.cfg.Selector) }
 
 // Wait returns the one server the selector picks, once the service has been
 // listening for at least minWindow (long enough to hear every server on the
-// LAN at least twice) and exactly one is heard. Until then onTick, if set, is
-// called regularly with the current result and whether minWindow has passed.
-// It returns false when ctx ends.
+// LAN at least twice) and that same server, at the same address, has been the
+// only one heard for at least minWindow without a break. Any look that finds
+// no single server, or a different one, starts that count again. So a server
+// heard alone just after the others' entries lapsed (their broadcasts paused,
+// say) is not chosen until the others have had a whole window to be heard
+// again, and a server first heard late in the window is given a window of its
+// own. Until then onTick, if set, is called regularly with the current result
+// and whether the listening window has passed. It returns false when ctx ends.
 func (s *Service) Wait(ctx context.Context, minWindow time.Duration, onTick func(r Result, windowDone bool)) (Candidate, bool) {
-	tick := min(max(minWindow/10, 10*time.Millisecond), time.Second)
+	tick := s.cfg.tick
+	if tick <= 0 {
+		tick = min(max(minWindow/10, 10*time.Millisecond), time.Second)
+	}
+	s.mu.Lock()
+	s.waiting, s.window = true, minWindow
+	s.mu.Unlock()
 	t := time.NewTicker(tick)
 	defer t.Stop()
+	var held stableChoice
 	for {
+		now := s.now()
 		s.mu.Lock()
-		windowDone := s.conn != nil && time.Since(s.listenedAt) >= minWindow
+		windowDone := s.conn != nil && now.Sub(s.listenedAt) >= minWindow
 		s.mu.Unlock()
 		r := s.Select()
-		if windowDone && r.Outcome == Selected {
+		heldFor := held.hold(r, now)
+		if r.Outcome == Selected && heldFor >= minWindow && windowDone {
 			return r.Selected, true
 		}
 		if onTick != nil {
@@ -168,11 +201,34 @@ func (s *Service) Wait(ctx context.Context, minWindow time.Duration, onTick func
 	}
 }
 
+// stableChoice tracks how long one server, at one address, has been Select's
+// choice without a break.
+type stableChoice struct {
+	held  bool
+	key   Key
+	ip    netip.Addr
+	since time.Time
+}
+
+// hold records r, seen at now, and returns how long its choice has held
+// unbroken. Unless r is Selected it forgets the choice and returns 0; a
+// different server or address starts the count again from now.
+func (c *stableChoice) hold(r Result, now time.Time) time.Duration {
+	if r.Outcome != Selected {
+		*c = stableChoice{}
+		return 0
+	}
+	if !c.held || c.key != r.Selected.Key || c.ip != r.Selected.IP {
+		*c = stableChoice{held: true, key: r.Selected.Key, ip: r.Selected.IP, since: now}
+	}
+	return now.Sub(c.since)
+}
+
 // SetSelected records the server chosen for this run, for reports.
 func (s *Service) SetSelected(c Candidate) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.selected, s.selectedAt = &c, time.Now().UTC()
+	s.selected, s.selectedAt = &c, s.now().UTC()
 }
 
 // Moved reports the pinned server's new address once it has plainly moved;
@@ -241,21 +297,120 @@ func (s *Service) state(listening bool, bindErr string, selected bool) string {
 }
 
 // NotReadyReason says why auto mode has no server yet, or "" when it has one
-// (or the service only reports).
+// (or the service only reports). It names what was heard, so an operator can
+// tell a selector that matches nothing, or announcements the agent will not
+// trust, from a network that delivers nothing; only the last gets the advice
+// about host networking and the firewall.
 func (s *Service) NotReadyReason() string {
 	s.mu.Lock()
 	listening, bindErr, selected, port := s.conn != nil, s.bindErr, s.selected != nil, s.port
+	windowDone := listening && s.waiting && s.now().Sub(s.listenedAt) >= s.window
 	s.mu.Unlock()
 	if !s.cfg.Auto || selected {
 		return ""
 	}
-	switch s.state(listening, bindErr, selected) {
-	case "bind_failed":
+	if s.state(listening, bindErr, selected) == "bind_failed" {
 		return fmt.Sprintf("cannot listen for the game server's announcement on UDP %d: %s", port, bindErr)
-	case "ambiguous", "conflict":
-		return "more than one game server announced; set OZONE_SID and OZONE_ARENA"
+	}
+	return s.waitDetail(port, windowDone)
+}
+
+// waitDetail says what auto mode has heard, against its selector, while it
+// has no server. The text depends only on which servers are heard where, not
+// on packet counts or times, so a caller can log it once per change.
+func (s *Service) waitDetail(port int, windowDone bool) string {
+	cs := s.table.Candidates()
+	r := SelectFrom(cs, s.cfg.Selector)
+	switch r.Outcome {
+	case Selected:
+		return "heard " + serverAt(r.Selected) + "; listening a little longer to be sure it is the only game server"
+	case Ambiguous:
+		var servers []string
+		for _, c := range r.Candidates {
+			servers = appendNew(servers, serverAt(c))
+		}
+		return "more than one game server announced (" + joinAnd(servers) + "); set OZONE_SID and OZONE_ARENA"
+	case Conflict:
+		var ips []string
+		for _, c := range r.Candidates {
+			ips = appendNew(ips, c.IP.String())
+		}
+		c := r.Candidates[0]
+		return fmt.Sprintf("site %s arena %d is announced from %s; set OZONE_WS_HOST to the right one", c.SIDRaw, c.Arena, joinAnd(ips))
+	}
+	if len(cs) == 0 {
+		if !windowDone {
+			return fmt.Sprintf("waiting for the game server's announcement on UDP %d", port)
+		}
+		return fmt.Sprintf("no game server announcement heard on UDP %d — in Docker this needs host networking; on Windows allow inbound UDP %d; or set OZONE_WS_HOST to the game server's IP", port, port)
+	}
+	var heard, untrusted []string
+	for _, c := range cs {
+		if c.Usable {
+			heard = appendNew(heard, serverAt(c))
+		} else {
+			untrusted = appendNew(untrusted, c.Reason)
+		}
+	}
+	if len(heard) > 0 {
+		return "heard " + joinAnd(heard) + ", but " + selectorText(s.cfg.Selector)
+	}
+	if len(untrusted) > maxListed {
+		untrusted = append(untrusted[:maxListed:maxListed], fmt.Sprintf("%d more", len(untrusted)-maxListed))
+	}
+	return "heard only announcements sent from another address than they name (" + strings.Join(untrusted, "; ") + "); set OZONE_WS_HOST"
+}
+
+// serverAt names a server and the address it announced.
+func serverAt(c Candidate) string {
+	return "site " + c.SIDRaw + " arena " + strconv.Itoa(c.Arena) + " at " + c.IP.String()
+}
+
+// selectorText says that the configured selector matches none of the
+// servers heard.
+func selectorText(sel Selector) string {
+	var set []string
+	if sel.SID != nil {
+		sid := sel.SIDRaw
+		if sid == "" {
+			sid = strconv.FormatUint(uint64(*sel.SID), 10)
+		}
+		set = append(set, "OZONE_SID="+sid)
+	}
+	if sel.Arena != nil {
+		set = append(set, "OZONE_ARENA="+strconv.Itoa(*sel.Arena))
+	}
+	switch len(set) {
+	case 0:
+		return "none of them can be chosen"
+	case 1:
+		return set[0] + " selects no server"
 	default:
-		return fmt.Sprintf("waiting for the game server's announcement on UDP %d", port)
+		return strings.Join(set, " and ") + " select no server"
+	}
+}
+
+// appendNew appends v to list unless it is already there.
+func appendNew(list []string, v string) []string {
+	if slices.Contains(list, v) {
+		return list
+	}
+	return append(list, v)
+}
+
+// joinAnd joins items as prose ("a", "a and b", "a, b and c"), naming at most
+// maxListed and counting the rest.
+func joinAnd(items []string) string {
+	if len(items) > maxListed {
+		items = append(items[:maxListed:maxListed], fmt.Sprintf("%d more", len(items)-maxListed))
+	}
+	switch len(items) {
+	case 0:
+		return ""
+	case 1:
+		return items[0]
+	default:
+		return strings.Join(items[:len(items)-1], ", ") + " and " + items[len(items)-1]
 	}
 }
 

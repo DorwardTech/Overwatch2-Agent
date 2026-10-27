@@ -114,7 +114,8 @@ number and its clock. Listening is passive; it puts no load on the server.
 server announces instead of a configured one:
 
 - It listens for at least 11 seconds (two announcements and a margin) before it
-  chooses, so a second server on the LAN is always heard first.
+  chooses, so a second server on the LAN is always heard first, and the server
+  it chooses must have been the only one heard for 11 seconds in a row.
 - It refuses to guess. With more than one site or arena on the LAN, or one site
   and arena announced from two addresses, it waits and logs what it hears. Set
   `OZONE_SID` and `OZONE_ARENA` to narrow the choice to one.
@@ -128,6 +129,8 @@ server announces instead of a configured one:
   been silent for 60 seconds, the new one has been heard at least twice, and the
   new one answers a read-only state request. If the machine at its address
   starts announcing a different site or arena, it restarts and chooses again.
+  Every poll checks this first: the poll that notices is dropped, and nothing
+  more is sent to central or asked of that machine's print server.
   A restart is the same graceful exit as a **Reboot agent** command, so it
   needs a restart policy (`unless-stopped`, the Windows service's recovery).
 
@@ -202,6 +205,19 @@ docker compose exec agent /agent healthcheck
 `/readyz` answers `200` once the agent has pushed to central in the last 30
 seconds; until then its body says why when there is a specific reason (auto
 mode still waiting for an announcement, for example).
+
+**Other programs on the game server.** O-Zone sends every client's replies to
+every connection, so while another program uses its WebSocket API the agent
+discards messages on every poll: replies to other clients' requests, and
+messages that arrived between its own requests. That is normal. The log
+explains it once, the first time it happens, and then sums it up at most once
+an hour. The counts since the agent started are in every self-report as
+`agent.frames`, and in `/api/overview` as `frames`: `foreign` (answered another
+request), `stale` (arrived between requests), `overflow` (dropped because too
+many were waiting) and `unsettled_lost` (polls that lost a message mid-poll).
+Only the last one costs anything: such a poll cannot confirm the server state,
+so the print server stays off-limits until a clean poll. When it grows the log
+says so in a warning, at most every five minutes.
 
 ## Build from source
 

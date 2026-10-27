@@ -75,6 +75,17 @@ var errFrameMismatch = errors.New("results: reply is for a different game")
 // agent ever fetching the real thing.
 var errNotGameData = errors.New("results: reply is not game data")
 
+// errIdentityLost ends a poll that found the machine at our address has become
+// a different game server (auto mode; see identityLost). The run is ending to
+// choose again, so it is not a poll error to reconnect after.
+var errIdentityLost = errors.New("O-Zone at our address is a different game server")
+
+// monoEpoch anchors the agent's monotonic readings: time.Since(monoEpoch) is
+// read from the monotonic clock, which a step of the wall clock (NTP
+// correcting a drifted clock, an operator, a virtual machine resuming) does
+// not move. See App.monoNow.
+var monoEpoch = time.Now()
+
 // unknownServerMode stands for "the server state could not be read as a mode".
 // It is deliberately outside both printServerSafe and gameActive, so it neither
 // opens the print-server gate nor claims a game is running.
@@ -166,8 +177,13 @@ type App struct {
 	lastGameNum  int
 	lastBusGame  int          // game number from the most recent GAME_START bus event
 	serverMode   atomic.Int32 // latest O-Zone SERVERMODE
-	serverModeAt atomic.Int64 // unix nanos when serverMode was last read (0 = never)
-	gameState    atomic.Int32 // idle/active/finishing (Message Bus driven)
+	serverModeAt atomic.Int64 // monoNow in nanoseconds when serverMode was last read: monotonic, not wall-clock (0 = never)
+	// serverModeWall is the wall-clock time (unix nanos) of the same reading.
+	// The gate trusts a reading only while both clocks call it current: Linux's
+	// monotonic clock stops while the host is suspended, and only the wall
+	// clock sees that time pass (see serverModeFresh). 0 = no wall time kept.
+	serverModeWall atomic.Int64
+	gameState      atomic.Int32 // idle/active/finishing (Message Bus driven)
 	// pollUnsettled is set when the last poll failed, could not be sure the
 	// server state it took was its own, or followed a sign that a game had
 	// started (see collect): its reading may not be current, so it may not
@@ -215,6 +231,14 @@ type App struct {
 	libWindow   time.Duration // listen this long before choosing
 	followAfter time.Duration // our address silent this long before following a move
 	probe       func(ctx context.Context, host, port string, timeout time.Duration) (int, error)
+	// mono replaces the monotonic clock (tests only; see monoNow).
+	mono func() time.Duration
+	// wall replaces the wall clock for serverModeWall (tests only).
+	wall func() time.Time
+
+	// frames tallies the frames the O-Zone connection discarded, across
+	// reconnects, for the log and the self-report (see frames.go).
+	frames frameTally
 
 	store  *store.Store   // local verbatim game cache (nil if disabled/unavailable)
 	cache  *cache.Cache   // O-Zone-shaped view over the store
@@ -257,7 +281,7 @@ func New(cfg config.Config) *App {
 		a.lib = ozonelib.New(ozonelib.Config{
 			Port:      cfg.LIB.Port,
 			Auto:      cfg.OzoneDiscover,
-			Selector:  ozonelib.Selector{SID: cfg.LIB.SID, Arena: cfg.LIB.Arena},
+			Selector:  ozonelib.Selector{SID: cfg.LIB.SID, SIDRaw: cfg.LIB.SIDRaw, Arena: cfg.LIB.Arena},
 			FixedHost: cfg.OzoneHost,
 		})
 		if cfg.OzoneDiscover {
@@ -358,6 +382,8 @@ func (a *App) Overview() map[string]any {
 	// The game server's address: the configured one, or in auto mode the one
 	// chosen ("" until then).
 	overview["ozone_host"] = a.ozoneAddr()
+	// Frames discarded from the game server since the agent started.
+	overview["frames"] = a.frames.report()
 	return overview
 }
 
@@ -482,33 +508,36 @@ func (a *App) pollLoop(ctx context.Context, client *ozone.Client) {
 	timer := time.NewTimer(0)
 	defer timer.Stop()
 
+	// This connection's discard counters start at zero. collect samples them
+	// on every poll; this samples them once more as the connection ends, so
+	// what was counted after the last poll, or in a poll that failed, is kept.
+	a.frames.connected()
+	defer func() { a.frames.sample(frameCountsOf(client)) }()
+
 	var lastSlow time.Time
-	var reportedForeign, reportedStale, reportedOverflow int64
 	poll := func() bool {
 		slow := time.Since(lastSlow) >= a.cfg.SlowPollInterval
 		payload, key, err := a.collect(client, slow)
+		if errors.Is(err, errIdentityLost) {
+			return false // logged; the run is ending to choose again
+		}
 		if err != nil {
 			log.Printf("[agent] poll error: %v (reconnecting)", err)
 			return false
 		}
 		if slow {
 			lastSlow = time.Now()
-			// Once a slow poll, not per frame: a busy O-Zone can produce them
-			// every second.
-			foreign, stale, overflow := client.ForeignFrames(), client.StaleFrames(), client.OverflowFrames()
-			if foreign > reportedForeign || stale > reportedStale || overflow > reportedOverflow {
-				log.Printf("[agent] O-Zone: discarded %d frame(s) that answered another command and %d that arrived between requests; dropped %d with the queue full",
-					foreign-reportedForeign, stale-reportedStale, overflow-reportedOverflow)
-				reportedForeign, reportedStale, reportedOverflow = foreign, stale, overflow
+			// Discarded frames: an explanation once, then at most a summary
+			// an hour and a warning every five minutes (see frameTally.lines).
+			// Another program using the game server makes some on every poll.
+			for _, line := range a.frames.lines(time.Now(), frameSummaryEvery) {
+				log.Print(line)
 			}
 			if a.cfg.CommandsEnabled {
 				go a.processCommands()
 			}
 			if a.store != nil {
 				go a.refreshCache()
-			}
-			if a.identityLost() {
-				return false
 			}
 		}
 		a.health.MarkPoll()
@@ -645,6 +674,16 @@ func (a *App) collect(client *ozone.Client, slow bool) ([]byte, string, error) {
 		a.pollUnsettled.Store(true)
 		return nil, "", err
 	}
+	// In auto mode, the machine at our address may have become a different
+	// game server. That is checked on every poll, here, before its reading
+	// is used or anything starts on the strength of it: finish work, results
+	// drains, commands, cache refreshes and the push all come after. A poll
+	// that finds it is dropped, starts nothing, closes the gate on work
+	// already running, and ends the run to choose again (see identityLost).
+	// With a fixed host this is false at once.
+	if a.identityLost() {
+		return nil, "", errIdentityLost
+	}
 	mode := toInt(server["SERVERMODE"])
 	// A reading that closes the gate needs no confirming: act on it now, so a
 	// slow or failed GETACTIVEPACKS cannot leave the gate open behind it.
@@ -676,6 +715,9 @@ func (a *App) collect(client *ozone.Client, slow bool) ([]byte, string, error) {
 	// could be the frame GETACTIVEPACKS took. A frame dropped unseen (lost)
 	// could have been anything, so the poll does not settle.
 	extras, lost := client.TakeDiscarded()
+	if lost != 0 {
+		a.frames.lostPoll()
+	}
 	settled := lost == 0 && printServerSafe(mode)
 	for _, f := range append(extras, packs) {
 		if !mayBeServerState(f) {
@@ -745,6 +787,13 @@ func (a *App) collect(client *ozone.Client, slow bool) ([]byte, string, error) {
 				payload["licence_info"] = r
 			}
 		}
+	}
+
+	// On every poll, after its last call, so the self-report below includes
+	// what this poll discarded.
+	a.frames.sample(frameCountsOf(client))
+
+	if slow {
 		// Agent self-report: version + health, so central can surface it.
 		pending, givenUp := a.resultsBacklog()
 		payload["agent"] = map[string]any{
@@ -756,6 +805,7 @@ func (a *App) collect(client *ozone.Client, slow bool) ([]byte, string, error) {
 			"commands":         a.cfg.CommandsEnabled,
 			"results_pending":  pending,
 			"results_given_up": givenUp,
+			"frames":           a.frames.report(),
 		}
 		if a.lib != nil {
 			payload["agent"].(map[string]any)["lib"] = a.lib.Report()
@@ -1268,7 +1318,16 @@ func printServerSafe(mode int) bool {
 // gate): once it drops they stop moving, so a favourable pair is only as good
 // as the moment it was read (see maxServerModeAge).
 func (a *App) safeForPrintServer(mode int) bool {
-	return printServerSafe(mode) && a.gameState.Load() == stateIdle && a.serverModeFresh() && !a.pollUnsettled.Load()
+	// identityChanged comes after serverModeFresh: a fresh reading means a poll
+	// has run, so the chosen server it reads was set before (see printServerGate).
+	return printServerSafe(mode) && a.gameState.Load() == stateIdle && a.serverModeFresh() && !a.pollUnsettled.Load() && !a.otherServerAtOurAddress()
+}
+
+// otherServerAtOurAddress reports whether the machine at our address has
+// become another game server (auto mode only; see identityChanged).
+func (a *App) otherServerAtOurAddress() bool {
+	_, lost := a.identityChanged()
+	return lost
 }
 
 // noteServerMode records a freshly read SERVERMODE. It is the ONLY writer of
@@ -1286,15 +1345,62 @@ func (a *App) noteServerMode(mode int) {
 		mode = unknownServerMode
 	}
 	a.serverMode.Store(int32(mode))
-	a.serverModeAt.Store(time.Now().UnixNano())
+	// Wall time first: a reader that sees the new monotonic stamp also sees
+	// the wall time that goes with it.
+	a.serverModeWall.Store(a.wallNow().UnixNano())
+	a.serverModeAt.Store(max(int64(a.monoNow()), 1)) // never 0, which means "never read"
+}
+
+// wallNow is the wall clock (see App.wall).
+func (a *App) wallNow() time.Time {
+	if a.wall != nil {
+		return a.wall()
+	}
+	return time.Now()
+}
+
+// monoNow is how long the process has run, read from the monotonic clock (see
+// monoEpoch). Readings that gate the print server are timed with it, never
+// with the wall clock.
+func (a *App) monoNow() time.Duration {
+	if a.mono != nil {
+		return a.mono()
+	}
+	return time.Since(monoEpoch)
+}
+
+// serverModeAge is how long ago SERVERMODE was last read, on the monotonic
+// clock; ok is false if it never has been.
+func (a *App) serverModeAge() (age time.Duration, ok bool) {
+	at := a.serverModeAt.Load()
+	if at == 0 {
+		return 0, false
+	}
+	return a.monoNow() - time.Duration(at), true
 }
 
 // serverModeFresh reports whether the last SERVERMODE reading is recent enough
 // to gate print-server access. A never-polled agent is never fresh: not knowing
 // the server state is not the same as knowing it is idle.
+//
+// The age is measured on the monotonic clock: on the wall clock, a step back
+// (NTP correcting a clock that ran fast, say) made a reading from before an
+// outage look current, and could open the gate on it. But Linux's monotonic
+// clock stops while the host is suspended, so a reading taken before a
+// suspend would look current after it, however long the host slept and
+// whatever O-Zone (a separate appliance) did meanwhile. The wall clock does
+// see that time pass, so it must not call the reading old either. A wall
+// clock stepped back only makes the reading look younger there, which leaves
+// the decision to the monotonic clock.
 func (a *App) serverModeFresh() bool {
-	at := a.serverModeAt.Load()
-	return at != 0 && time.Since(time.Unix(0, at)) <= maxServerModeAge
+	age, ok := a.serverModeAge()
+	if !ok || age < 0 || age > maxServerModeAge {
+		return false
+	}
+	if wall := a.serverModeWall.Load(); wall != 0 && a.wallNow().Sub(time.Unix(0, wall)) > maxServerModeAge {
+		return false
+	}
+	return true
 }
 
 // printServerGate is safeForPrintServer with the reason attached, for the paths
@@ -1302,6 +1408,16 @@ func (a *App) serverModeFresh() bool {
 func (a *App) printServerGate() error {
 	if !a.serverModeFresh() {
 		return errLinkStale
+	}
+	// The machine at our address has become another game server: its print
+	// server is not ours, whatever reaches for it between polls (an admin
+	// Resync, a finish timer, a drain or backfill already running). collect
+	// notices on the next poll and restarts; until then the gate stays shut.
+	// Checked after freshness, which only a poll provides, so the chosen
+	// server identityChanged reads was set before it (awaitOzone sets it
+	// before the first poll and nothing changes it after).
+	if a.otherServerAtOurAddress() {
+		return errPollUnsettled
 	}
 	// A game is reported before an unsettled poll: every poll during a game
 	// is unsettled (its reading does not read idle), and "game in progress" is
@@ -1383,6 +1499,14 @@ func (a *App) handleBusEvent(ev msgbus.Event) {
 	case msgbus.EventGameAbort, msgbus.EventIdle:
 		a.gameState.Store(stateIdle)
 	case msgbus.EventGameFinish:
+		// The bus speaks for the machine at our address. If that has become
+		// a different game server (auto mode), this finish is not our
+		// server's: queue nothing and start nothing. The next poll ends the
+		// run to choose again.
+		if reason, lost := a.identityChanged(); lost {
+			log.Printf("[agent] bus: GAME_FINISH ignored — %s", reason)
+			return
+		}
 		a.gameState.Store(stateFinishing)
 		a.mu.Lock()
 		g := a.lastBusGame
