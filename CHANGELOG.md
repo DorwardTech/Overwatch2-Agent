@@ -6,6 +6,93 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 The Site Agent and central Overwatch are versioned independently.
 
+## [1.8.0] — 2026-10-25
+
+A quieter log when other programs use the game server, and the counts behind
+it in the self-report. There is nothing to set up: no setting is new or
+changed, and nothing about when the agent uses the print server has changed.
+
+### Added
+
+- **The self-report counts the messages the agent discards**, as
+  `agent.frames`, and so does `/api/overview`, as `frames`. `foreign` counts
+  replies to other programs' requests; `stale`, messages that arrived between
+  the agent's own requests; `overflow`, messages dropped because too many were
+  waiting; and `unsettled_lost`, polls that lost a message while they waited
+  for their replies. Each counts from when the agent started, across
+  reconnects.
+
+### Changed
+
+- **The once-a-minute "discarded" log line is gone.** The game server sends
+  every program's replies to every connection. So while another program used
+  it, the agent logged how many messages it had discarded about once a
+  minute, all day, from 1.6.5 on. That is normal, and the line buried the ones
+  that matter. Now the log explains it once, the first time it happens, then
+  sums it up at most once an hour, and only when something new was discarded.
+- **A warning when a poll loses a message.** A message lost while a poll waits
+  for its replies could have been the game server's status, so that poll
+  cannot confirm it, and the print server stays off-limits until a clean poll.
+  Of all the discards, only that one matters, and the log now warns about it,
+  at most every five minutes. Messages dropped between polls are only counted.
+
+## [1.7.1] — 2026-10-25
+
+Fixes for finding the game server with `auto`, for a computer clock that
+jumps, and for "Time left" at legacy venues. There is nothing to set up: no
+setting is new or changed.
+
+### Fixed
+
+- **A clock change could let `auto` choose the wrong server.** How long ago
+  each server was last heard was measured on the computer's clock. If that
+  clock jumped forward (a time sync, say), every server heard so far looked
+  gone at once, and the first one heard again could be chosen while another
+  was still on the network. Those times are now measured on a clock that a
+  change of time does not move. A server must also now be the only one heard
+  for 11 seconds in a row before it is chosen. If another server is heard in
+  that time, the agent waits again. Choosing at startup can therefore take a
+  few seconds longer: up to about 16 seconds rather than 11.
+- **While it waits, the agent says what it actually heard.** Before, every
+  wait except "more than one server" said it was waiting for an announcement,
+  with advice about host networking and the firewall, even when the network
+  was fine. Now the log and `/readyz` say what was heard. For example: a
+  server for site 0564 arena 0 was heard, but the arena setting asks for
+  arena 1. Or every announcement heard came from a different address than the
+  one it names, so set the game server address instead. Or one site and arena
+  is announced from two addresses. The networking advice is given only when
+  nothing at all was heard. Each message is logged when it changes, and again
+  every five minutes while it stands. The self-report still says `waiting`.
+- **A different server at the chosen address is noticed before anything uses
+  it.** With `auto`, if the machine at the chosen address starts announcing a
+  different site or arena, the agent restarts and chooses again. It used to
+  check only once a minute, after that poll's work had already started:
+  fetching finished games from the print server, running commands from
+  central, refreshing the cache, and sending the poll to central. Now every
+  poll checks first, as soon as the game server answers. The poll that
+  notices is dropped: nothing from it is sent, and nothing is started. The
+  print server is also off-limits from the moment the change is heard, even
+  between polls, so a Resync, a game-finished wait or work already under way
+  never reaches the other machine's print server. A "game finished" message
+  from that machine is ignored too. An agent with a fixed address is not
+  affected.
+- **The print-server safety check no longer trusts the computer's clock.**
+  The agent only uses the print server while a recent status reading says the
+  game server is between games. "Recent" was measured on the computer's
+  clock, so if the clock was set back, a reading taken before the agent lost
+  contact could look recent again. It is now measured on a clock that a change
+  of time does not move. That clock stops while a Linux computer is asleep, so
+  the computer's own clock must also agree the reading is recent: after the
+  agent's computer wakes, the print server stays off-limits until the agent
+  has read the game server's status again.
+- **Legacy (Nexus) venues: "Time left" showed the time played.** The agent
+  sent the seconds played where central expects the seconds left. It now
+  sends the game's length less the time played, and never less than zero.
+  When Nexus does not report how long the game is, the agent sends 0 rather
+  than guess.
+- A server heard again after more than 30 seconds of silence now starts
+  afresh: its earlier announcements no longer count towards hearing it twice.
+
 ## [1.7.0] — 2026-10-24
 
 The agent can find the game server by itself. The game server announces its

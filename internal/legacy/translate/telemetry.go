@@ -79,7 +79,7 @@ func TelemetryPayload(
 		"server_state": map[string]any{
 			"SERVERMODE":   ServerMode(status.ServerMode, status.GameID),
 			"GAMENUM":      status.GameID,
-			"GAMETIME":     status.Elapsed,
+			"GAMETIME":     TimeRemaining(status),
 			"GAMEDURATION": status.Duration,
 			"DESCRIPTION":  status.GameName,
 			"TELEONLINE":   true,
@@ -90,6 +90,19 @@ func TelemetryPayload(
 			"packs_online": status.PacksOnline,
 		},
 	}
+}
+
+// TimeRemaining is the seconds left in the current game, which is what central
+// reads GAMETIME as (the live view's "Time left"). Nexus reports the seconds
+// elapsed and the game's length, both in seconds, so it is the length less the
+// time elapsed, never below 0. A game whose length Nexus does not report (0)
+// has nothing to count down from: 0 is sent, not the elapsed time, which would
+// read as time left.
+func TimeRemaining(status lasertag.ServerStatus) int {
+	if status.Duration <= 0 {
+		return 0
+	}
+	return max(status.Duration-max(status.Elapsed, 0), 0)
 }
 
 // ServerMode maps a Nexus server mode to the O-Zone SERVERMODE the frontend

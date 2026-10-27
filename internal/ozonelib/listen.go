@@ -19,7 +19,10 @@ func Listen(ctx context.Context, port int) (net.PacketConn, error) {
 }
 
 // readLoop reads announcements from conn into t until conn is closed. Each is
-// stamped with its arrival time (UTC) as soon as it is read. A datagram from
+// stamped with its arrival time as soon as it is read, from the table's clock:
+// time.Now, keeping its monotonic reading, so how long ago a server was heard
+// is measured on a clock that a step of the wall clock does not move. Reports
+// convert a stamp to UTC only when they format it. A datagram from
 // a sender outside every network this machine is on is dropped: a broadcast
 // never crosses a router, so one that did is not a game server on this LAN.
 // heard, if set, runs after each recorded announcement.
@@ -27,7 +30,7 @@ func readLoop(conn net.PacketConn, t *Table, links *linkCache, heard func(Packet
 	buf := make([]byte, MaxPacket+1)
 	for {
 		n, addr, err := conn.ReadFrom(buf)
-		at := time.Now().UTC()
+		at := t.now()
 		if err != nil {
 			if errors.Is(err, net.ErrClosed) {
 				return

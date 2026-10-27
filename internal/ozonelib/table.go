@@ -24,8 +24,11 @@ type Candidate struct {
 	SIDRaw    string
 	Packets   int
 	FirstSeen time.Time
-	LastSeen  time.Time // when its latest announcement was received (UTC)
-	Last      Packet
+	// LastSeen is when its latest announcement was received, on this
+	// machine's clock with its monotonic reading kept (see readLoop): call
+	// .UTC() to format it.
+	LastSeen time.Time
+	Last     Packet
 	// Usable is false when the announcement came from an address other than
 	// the one it names. Such a server is listed, with Reason, but never chosen.
 	Usable bool
@@ -76,6 +79,8 @@ type Result struct {
 type Selector struct {
 	SID   *uint32
 	Arena *int
+	// SIDRaw is OZONE_SID as written, for messages; SID is used when empty.
+	SIDRaw string
 }
 
 func (s Selector) matches(k Key) bool {
@@ -113,7 +118,10 @@ func NewTable(now func() time.Time) *Table {
 	return &Table{now: now, ttl: entryTTL, entries: map[entryKey]*entry{}}
 }
 
-// Observe records an announcement received from sender at at.
+// Observe records an announcement received from sender at at. Entries that
+// have lapsed are dropped first, so a server heard again after a silence
+// longer than the TTL starts afresh: its earlier packets do not count towards
+// being heard twice.
 func (t *Table) Observe(p Packet, sender netip.Addr, at time.Time) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -121,6 +129,7 @@ func (t *Table) Observe(p Packet, sender netip.Addr, at time.Time) {
 	if sender != p.IP {
 		t.counters.SenderMismatch++
 	}
+	t.expireLocked()
 	k := entryKey{key: p.Key(), ip: p.IP, sender: sender}
 	e := t.entries[k]
 	if e == nil {
@@ -130,7 +139,6 @@ func (t *Table) Observe(p Packet, sender netip.Addr, at time.Time) {
 	e.last = p
 	e.packets++
 	e.lastSeen = at
-	t.expireLocked()
 	for len(t.entries) > maxEntries {
 		var oldest entryKey
 		var oldestAt time.Time

@@ -45,7 +45,7 @@ func TestSyncGamesDefersOnAStaleLink(t *testing.T) {
 		`"starttime":"s","endtime":"e","playercount":2,"valid":1}]}`))
 
 	// Last seen idle — but long enough ago that it means nothing now.
-	a.serverModeAt.Store(time.Now().Add(-maxServerModeAge - time.Second).UnixNano())
+	ageServerMode(a, maxServerModeAge+time.Second)
 
 	status, result := a.syncGames(map[string]any{}, true)
 
@@ -398,7 +398,7 @@ func TestPrintServerBusyCountAlwaysReturnsToZero(t *testing.T) {
 	t.Run("after a batch that never dials", func(t *testing.T) {
 		a, ps := newSimApp(t)
 		ps.SetList([]byte(oneValidGame))
-		a.serverModeAt.Store(time.Now().Add(-maxServerModeAge - time.Second).UnixNano())
+		ageServerMode(a, maxServerModeAge+time.Second)
 
 		if status, _ := a.syncGames(map[string]any{}, true); status != "deferred" {
 			t.Fatalf("status = %q, want deferred on a stale link", status)
