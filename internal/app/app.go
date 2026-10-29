@@ -112,7 +112,7 @@ const maxFailoverPushes = 4
 // really just an old memory of an idle server.
 //
 // Two minutes is comfortably above the worst honest gap between readings (a
-// slow poll can spend ~10s on each of five WebSocket commands plus a ~15s push
+// slow poll can spend ~10s on each of six WebSocket commands plus a ~15s push
 // before the next idle tick) and far below any real outage.
 const maxServerModeAge = 2 * time.Minute
 
@@ -239,6 +239,10 @@ type App struct {
 	// frames tallies the frames the O-Zone connection discarded, across
 	// reconnects, for the log and the self-report (see frames.go).
 	frames frameTally
+
+	// site is the game server's system type, from GETSITEINFO (see
+	// siteinfo.go). Each connection starts it afresh.
+	site siteInfo
 
 	store  *store.Store   // local verbatim game cache (nil if disabled/unavailable)
 	cache  *cache.Cache   // O-Zone-shaped view over the store
@@ -513,6 +517,8 @@ func (a *App) pollLoop(ctx context.Context, client *ozone.Client) {
 	// what was counted after the last poll, or in a poll that failed, is kept.
 	a.frames.connected()
 	defer func() { a.frames.sample(frameCountsOf(client)) }()
+	// The address may answer for another game server after a reconnect.
+	a.site = siteInfo{}
 
 	var lastSlow time.Time
 	poll := func() bool {
@@ -770,9 +776,11 @@ func (a *App) collect(client *ozone.Client, slow bool) ([]byte, string, error) {
 		// replyTimeout, and all the while nothing reads the server state, so
 		// the gate stands on this poll's verdict: one unanswered command must
 		// not leave it there for three timeouts.
+		roundOK := true
 		for _, cmd := range []string{"GETTEAMINFO", "GETGAMELIST", "GETFEATURELICINFO"} {
 			r, err := client.Command(cmd)
 			if err != nil {
+				roundOK = false
 				break
 			}
 			switch cmd {
@@ -786,6 +794,19 @@ func (a *App) collect(client *ozone.Client, slow bool) ([]byte, string, error) {
 				// can extract the timed licences for expiry tracking.
 				payload["licence_info"] = r
 			}
+		}
+		// What system the game server is (SYSFLAG in GETSITEINFO), asked once
+		// a connection and then hourly, and only on a settled poll between
+		// games: a core that does not know the command may answer nothing, and
+		// its reply timeout must never hold up the poll while packs are
+		// playing. Only after the round above went through, as it ends on
+		// the first failure. Every slow push repeats the last reading.
+		if roundOK && settled && a.site.due(time.Now()) {
+			r, _ := client.Command("GETSITEINFO")
+			a.site.note(r, time.Now())
+		}
+		if info := a.site.report(); info != nil {
+			payload["site_info"] = info
 		}
 	}
 
