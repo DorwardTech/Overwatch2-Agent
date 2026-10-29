@@ -11,7 +11,7 @@ services:
       context: .
       args:
         # Stamp the built binary's version so it never reports "dev".
-        AGENT_VERSION: ${AGENT_VERSION:-1.8.0}
+        AGENT_VERSION: ${AGENT_VERSION:-1.9.0}
     # image: ghcr.io/dorwardtech/overwatch2-agent:latest
     restart: unless-stopped
     # OZONE_WS_HOST=auto finds O-Zone from the announcement it broadcasts on

@@ -6,6 +6,27 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 The Site Agent and central Overwatch are versioned independently.
 
+## [1.9.0] — 2026-10-29
+
+The agent tells central which system the game server runs. There is nothing
+to set up: no setting is new or changed, and nothing about when the agent uses
+the print server has changed.
+
+### Added
+
+- **The game server's system type, in every slow push**, as `site_info`:
+  `{"sysflag": 128}`. It is the system-type flag from the game server's own
+  site information (one bit per system: Phasor Strike, Helios Pro, Helios 2,
+  Begeara 3, Titan, Helios 3, or 0 for none), which central names on the
+  Sites page. Nothing else from that information is sent.
+  - **When it asks:** once a connection, at the first slow poll between
+    games, then once an hour. It never asks while a game is starting or
+    running, or on a poll it could not confirm, so a game server that does
+    not know the command costs one reply timeout an hour, between games, and
+    never holds up a poll during play.
+  - **Until it answers**, pushes carry no `site_info`, and central keeps
+    what it had.
+
 ## [1.8.0] — 2026-10-25
 
 A quieter log when other programs use the game server, and the counts behind
