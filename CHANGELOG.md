@@ -17,7 +17,7 @@ the print server has changed.
 - **The game server's system type, in every slow push**, as `site_info`:
   `{"sysflag": 128}`. It is the system-type flag from the game server's own
   site information (one bit per system: Phasor Strike, Helios Pro, Helios 2,
-  Begeara 3, Titan, Helios 3, or 0 for none), which central names on the
+  Begeara 3, Helios 3, or 0 for none), which central names on the
   Sites page. Nothing else from that information is sent.
   - **When it asks:** once a connection, at the first slow poll between
     games, then once an hour. It never asks while a game is starting or
