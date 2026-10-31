@@ -785,7 +785,7 @@ func (a *App) collect(client *ozone.Client, slow bool) ([]byte, string, error) {
 			}
 			switch cmd {
 			case "GETTEAMINFO":
-				payload["team_info"] = r["TEAMS"]
+				payload["team_info"] = teamList(r)
 			case "GETGAMELIST":
 				payload["game_list"] = r["GAMES"]
 			default:
@@ -2216,4 +2216,15 @@ func nextBackoff(d time.Duration) time.Duration {
 		return 30 * time.Second
 	}
 	return d
+}
+
+// teamList is the team list in a GETTEAMINFO reply. O-Zone sends it as
+// TEAMDETAILS (seen in production replies, October 2026); the agent read
+// TEAMS until 1.9.1 and so never sent one. TEAMS is still read when there is
+// no TEAMDETAILS, as the simulator answered before it was corrected.
+func teamList(r map[string]any) any {
+	if teams, ok := r["TEAMDETAILS"]; ok && teams != nil {
+		return teams
+	}
+	return r["TEAMS"]
 }
