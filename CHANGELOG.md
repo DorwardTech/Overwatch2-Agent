@@ -6,6 +6,24 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 The Site Agent and central Overwatch are versioned independently.
 
+## [1.9.1] — 2026-10-31
+
+The agent sends the game server's team list to central, so the live page can
+show each team in its real colour. There is nothing to set up: no setting is
+new or changed, and nothing about when the agent uses the print server has
+changed.
+
+### Fixed
+
+- **The team list was never sent.** The game server's `GETTEAMINFO` reply
+  carries its teams as `TEAMDETAILS`; the agent read `TEAMS`, which the game
+  server does not send, so every slow push went without one. The agent now
+  reads `TEAMDETAILS` (still `TEAMS` when a reply has no `TEAMDETAILS`) and
+  forwards it as `team_info`, as before: each team's name, colour number and
+  colour.
+- **Simulator:** answers `GETTEAMINFO` with `TEAMDETAILS`, and gives each team
+  its colour number.
+
 ## [1.9.0] — 2026-10-29
 
 The agent tells central which system the game server runs. There is nothing
