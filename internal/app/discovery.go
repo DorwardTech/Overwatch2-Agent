@@ -50,7 +50,7 @@ func (a *App) ozoneAddr() string {
 // changes, and again every five minutes while it stands.
 func (a *App) awaitOzone(ctx context.Context) bool {
 	if err := a.lib.Start(ctx); err != nil {
-		log.Printf("[agent] O-Zone discovery: cannot listen on UDP %d: %v — set OZONE_WS_HOST to the game server's IP", a.lib.Port(), err)
+		log.Printf("[agent] O-Zone discovery: cannot listen on UDP %d: %v — set OZONE_WS_HOST to the game server's IP%s", a.lib.Port(), err, because(a.lib.Port(), err))
 	}
 	var logged string
 	var loggedAt time.Time
@@ -174,4 +174,13 @@ func (a *App) restartFor(reason string) {
 	if a.stopRun != nil {
 		a.stopRun()
 	}
+}
+
+// because is ozonelib.BindProblem as the end of a log line: the cause as a
+// sentence of its own, or nothing when it is not known.
+func because(port int, err error) string {
+	if why := ozonelib.BindProblem(port, err); why != "" {
+		return ". " + why
+	}
+	return ""
 }

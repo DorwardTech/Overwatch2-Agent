@@ -687,3 +687,23 @@ func TestTheGateClosesAsSoonAsAnotherServerIsHeard(t *testing.T) {
 		t.Fatalf("the other server's print server was contacted %d time(s) between polls", n)
 	}
 }
+
+func TestABindFailureLogLineGivesTheCause(t *testing.T) {
+	if got := because(12106, errors.New("listen udp4 :12106: something else")); got != "" {
+		t.Errorf("because(unrelated) = %q, want nothing", got)
+	}
+	held, err := net.ListenPacket("udp4", ":0") // bound without reuse
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+	port := held.LocalAddr().(*net.UDPAddr).Port
+	conn, lerr := ozonelib.Listen(context.Background(), port)
+	if lerr == nil {
+		_ = conn.Close()
+		t.Skip("this platform let a reuse bind share a port held without reuse")
+	}
+	if got := because(port, lerr); !strings.HasPrefix(got, ". Another program on this computer") {
+		t.Errorf("because(held) = %q", got)
+	}
+}

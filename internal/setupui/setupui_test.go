@@ -1042,6 +1042,45 @@ func TestDiscoverMarksAServerOnThisComputer(t *testing.T) {
 	}
 }
 
+// A port another program holds without sharing it: the page says so and what
+// to do, not the network checks, which cannot help when nothing can listen.
+func TestAPortHeldWithoutSharingIsExplained(t *testing.T) {
+	held, err := net.ListenPacket("udp4", ":0") // bound without reuse
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+	port := held.LocalAddr().(*net.UDPAddr).Port
+	conn, lerr := ozonelib.Listen(context.Background(), port)
+	if lerr == nil {
+		_ = conn.Close()
+		t.Skip("this platform let a reuse bind share a port held without reuse")
+	}
+
+	f := &fakeNet{scanErr: lerr}
+	s, h := newDiscoverServer(t, f)
+	s.libPort = port
+	got := discover(t, s, h, `{}`)
+	if msg, _ := got["message"].(string); !strings.Contains(msg, "without sharing it") {
+		t.Errorf("message = %q, want the cause", msg)
+	}
+	if advice, _ := got["advice"].(string); advice != "Free the port, or type the game server's IP address instead." {
+		t.Errorf("advice = %q", advice)
+	}
+
+	// Find says the same.
+	found := decode(t, do(t, h, http.MethodPost, "/api/test/gameserver", s.key, `{"host":"auto"}`))
+	msg, _ := found["message"].(string)
+	for _, want := range []string{"Could not listen", "without sharing it", "type the game server's IP address instead"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("Find message = %q, missing %q", msg, want)
+		}
+	}
+	if strings.Contains(msg, "firewall") {
+		t.Errorf("Find message = %q, gives the network checks for a port it could not open", msg)
+	}
+}
+
 func TestDiscoverReportsABindFailure(t *testing.T) {
 	f := &fakeNet{scanErr: errors.New("listen udp4 :42106: bind: address already in use")}
 	s, h := newDiscoverServer(t, f)

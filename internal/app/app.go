@@ -430,7 +430,7 @@ func (a *App) Run(ctx context.Context) {
 	// logged and changes nothing.
 	if a.lib != nil && !a.cfg.OzoneDiscover {
 		if err := a.lib.Start(ctx); err != nil {
-			log.Printf("[agent] LIB: not listening for the game server's announcement on UDP %d: %v (reporting only; nothing else changes)", a.lib.Port(), err)
+			log.Printf("[agent] LIB: not listening for the game server's announcement on UDP %d: %v (reporting only; nothing else changes)%s", a.lib.Port(), err, because(a.lib.Port(), err))
 		}
 	}
 	// In auto mode the bus starts once the address is chosen (awaitOzone).

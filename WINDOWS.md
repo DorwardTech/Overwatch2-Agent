@@ -38,7 +38,7 @@ PC itself is the usual choice; the one thing to know about that is under
    > release before running it:
    >
    > ```powershell
-   > Get-FileHash .\overwatch-agent_1.9.1_windows_setup.exe -Algorithm SHA256
+   > Get-FileHash .\overwatch-agent_1.9.2_windows_setup.exe -Algorithm SHA256
    > ```
 
    The installer copies the agent to `C:\Program Files\Overwatch Agent\` and
@@ -111,7 +111,7 @@ the identical agent:
    check it against `SHA256SUMS.txt` from the same release:
 
    ```powershell
-   Get-FileHash .\overwatch-agent_1.9.1_windows_amd64.zip -Algorithm SHA256
+   Get-FileHash .\overwatch-agent_1.9.2_windows_amd64.zip -Algorithm SHA256
    ```
 
 2. **Extract** it to `C:\Program Files\Overwatch Agent\`. Keep the executable
@@ -136,7 +136,7 @@ The installer itself takes the usual Inno Setup switches, so a scripted rollout
 can run it unattended:
 
 ```powershell
-.\overwatch-agent_1.9.1_windows_setup.exe /VERYSILENT /NORESTART
+.\overwatch-agent_1.9.2_windows_setup.exe /VERYSILENT /NORESTART
 ```
 
 A silent install registers and configures the service but does not open the
@@ -312,6 +312,22 @@ open it. If other venue software on this PC listens for the game server's
 announcement, set `ENABLE_LIB_LISTENER=false` (with a fixed address) so the
 agent leaves the port alone.
 
+When the port cannot be opened, the setup page, `discover` and the log say
+that another program holds it without sharing it, and name the program when
+they can. Windows reports this as *"An attempt was made to access a socket in a
+way forbidden by its access permissions"*. To look for yourself, from an
+elevated PowerShell:
+
+```powershell
+Get-NetUDPEndpoint -LocalPort 12106 | % { $_; (Get-Process -Id $_.OwningProcess).Path }
+```
+
+Windows gives the same error when it has reserved the port, which Hyper-V, WSL
+and Docker Desktop can do: `netsh interface ipv4 show excludedportrange
+protocol=udp` lists the reserved ranges. Restarting the WinNAT service
+(`net stop winnat`, then `net start winnat`) or the PC draws them again.
+Either way, typing the game server's address in works without the port.
+
 It also listens locally on `HEALTH_ADDR` (port 8088 on every interface by
 default) for its own health check; the firewall keeps that off the LAN, and
 setting `HEALTH_ADDR=127.0.0.1:8088` in `agent.env` keeps it off the LAN
@@ -455,6 +471,7 @@ a terminal.
 | site stays offline | the setup page's **Test this connection** buttons; in `agent.log` a wrong token is a `401` and a wrong host a `connect failed` |
 | the setup page will not open | it needs administrator rights — use the Start Menu entry, or run `overwatch-agent setup` from an elevated prompt |
 | proxy failed to start | port `12123` is the real print server's on this PC — set `PROXY_LISTEN_ADDR` |
+| **Find** says it could not listen on UDP `12106` (*forbidden by its access permissions*) | another program on this PC holds the port without sharing it (the message names it when it can), or Windows has reserved the port: see **Sharing the port** above. Typing the address in still works |
 | **Find** found nothing | the firewall rule (`netsh advfirewall firewall show rule name="Overwatch Agent - O-Zone discovery (UDP 12106)"`) and the network profile (a profile set to block all incoming connections overrides the rule); whether this PC is on the same subnet and VLAN as the game server (the announcement does not cross a router); whether the game server is running. `overwatch-agent discover` runs the same check from a prompt. Typing the address in still works |
 
 ## Building from source

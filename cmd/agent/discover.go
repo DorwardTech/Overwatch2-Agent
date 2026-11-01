@@ -66,6 +66,7 @@ func discover(ctx context.Context, w io.Writer, lib config.LIBSettings, host str
 		Host:        strings.TrimSpace(host),
 		OS:          runtime.GOOS,
 		BindErr:     err,
+		BindWhy:     ozonelib.BindProblem(lib.Port, err),
 		Interrupted: ctx.Err() != nil,
 		Candidates:  cs,
 		Counters:    n,
@@ -81,6 +82,7 @@ type discoverReport struct {
 	Host        string // OZONE_WS_HOST as set, trimmed ("" means the default)
 	OS          string // runtime.GOOS: which advice applies
 	BindErr     error
+	BindWhy     string // why the port could not be opened, when known (ozonelib.BindProblem)
 	Interrupted bool
 	Candidates  []ozonelib.Candidate
 	Counters    ozonelib.Counters
@@ -95,6 +97,11 @@ func writeDiscover(w io.Writer, r discoverReport) int {
 	port := r.LIB.Port
 	if r.BindErr != nil {
 		fmt.Fprintf(w, "Cannot listen on UDP %d: %v\n", port, r.BindErr)
+		if r.BindWhy != "" {
+			fmt.Fprintln(w, r.BindWhy)
+			fmt.Fprintln(w, "Free the port, or set OZONE_WS_HOST to the game server's IP instead of discovering it.")
+			return exitFailure
+		}
 		fmt.Fprintln(w, "Another program may hold the port exclusively (the agent itself shares it). Close that")
 		fmt.Fprintln(w, "program, or set OZONE_WS_HOST to the game server's IP instead of discovering it.")
 		return exitFailure
