@@ -6,6 +6,24 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 The Site Agent and central Overwatch are versioned independently.
 
+## [1.9.2] — 2026-10-31
+
+A clearer message when the agent cannot listen for the game server's
+announcement. There is nothing to set up: no setting is new or changed, and
+nothing about when the agent uses the print server has changed.
+
+### Fixed
+
+- **"Could not listen… forbidden by its access permissions" now says why.**
+  On Windows, the setup page's **Find**, `overwatch-agent discover` and the
+  log showed only the system's error when UDP 12106 could not be opened. That
+  happens when another program on the computer holds the port without sharing
+  it, or when Windows has reserved the port (Hyper-V, WSL and Docker Desktop
+  can). The message now says so, names the program holding the port when it
+  can, and says what to do instead: free the port, or enter the game server's
+  address rather than finding it. On Linux the same applies to "address
+  already in use", without the program's name.
+
 ## [1.9.1] — 2026-10-31
 
 The agent sends the game server's team list to central, so the live page can

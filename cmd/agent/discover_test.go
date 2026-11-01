@@ -333,6 +333,31 @@ func TestDiscoverBindFailure(t *testing.T) {
 	mustNotContain(t, out, "Packets:", "would")
 }
 
+// A port another program holds without sharing it is explained, through the
+// real listener, and the agent's own sharing is not blamed.
+func TestDiscoverExplainsAPortHeldWithoutSharing(t *testing.T) {
+	held, err := net.ListenPacket("udp4", ":0") // bound without reuse
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+	lib := selectors(t, "", -1)
+	lib.Port = held.LocalAddr().(*net.UDPAddr).Port
+
+	var b bytes.Buffer
+	code := discover(context.Background(), &b, lib, "auto", 1, ozonelib.Scan)
+	out := b.String()
+	if strings.Contains(out, "Listening on UDP") && !strings.Contains(out, "Cannot listen") {
+		t.Skip("this platform let a reuse bind share a port held without reuse")
+	}
+	if code != exitFailure {
+		t.Errorf("exit = %d, want %d", code, exitFailure)
+	}
+	mustContain(t, out, "Cannot listen on UDP "+strconv.Itoa(lib.Port), "holds UDP "+strconv.Itoa(lib.Port)+" without sharing it",
+		"Free the port, or set OZONE_WS_HOST to the game server's IP instead of discovering it.")
+	mustNotContain(t, out, "may hold the port exclusively")
+}
+
 func TestDiscoverCustomPortOnWindows(t *testing.T) {
 	l := selectors(t, "", -1)
 	l.Port = 12107

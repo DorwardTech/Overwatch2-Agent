@@ -60,6 +60,11 @@ jobs:
           go-version: '1.26.10'
           check-latest: true
 
+      # Naming the program that holds the discovery port reads a Windows-only
+      # table; the lint job above cross-compiles it but cannot run it.
+      - name: Test the Windows-only port checks
+        run: go test -count=1 -run 'BindProblem|UDPPortHolders|BindFailure' ./internal/ozonelib/
+
       - name: Stage a payload
         shell: pwsh
         env:

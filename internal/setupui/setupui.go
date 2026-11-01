@@ -823,7 +823,7 @@ func (s *Server) testDiscovered(w http.ResponseWriter, r *http.Request, port, si
 
 	cs, _, err := s.scan(r.Context(), s.libPort, discoverWindow)
 	if err != nil {
-		reply(false, bindProblem(s.libPort, err)+" "+noServerAdvice(s.libPort))
+		reply(false, bindProblem(s.libPort, err)+" "+bindAdvice(s.libPort, err))
 		return
 	}
 	res := ozonelib.SelectFrom(cs, sel)
@@ -902,7 +902,7 @@ func (s *Server) handleDiscover(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		body["bind_error"] = err.Error()
 		body["message"] = bindProblem(s.libPort, err)
-		body["advice"] = advice
+		body["advice"] = bindAdvice(s.libPort, err)
 		writeJSON(w, http.StatusOK, body)
 		return
 	}
@@ -1050,7 +1050,21 @@ func probePort(raw string) (string, string) {
 }
 
 func bindProblem(port int, err error) string {
-	return fmt.Sprintf("Could not listen for the game server's announcement on UDP %d (%v).", port, err)
+	msg := fmt.Sprintf("Could not listen for the game server's announcement on UDP %d (%v).", port, err)
+	if why := ozonelib.BindProblem(port, err); why != "" {
+		msg += " " + why
+	}
+	return msg
+}
+
+// bindAdvice is what to do when the port could not be opened. Once the cause
+// is known to be another program, or a reserved port, the network checks of
+// noServerAdvice cannot help.
+func bindAdvice(port int, err error) string {
+	if ozonelib.BindProblem(port, err) != "" {
+		return "Free the port, or type the game server's IP address instead."
+	}
+	return noServerAdvice(port)
 }
 
 // noServerAdvice is what to check when no game server was heard.
