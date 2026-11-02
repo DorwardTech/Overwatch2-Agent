@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"net"
 	"sort"
 	"strconv"
 	"strings"
@@ -153,6 +154,7 @@ type pendingGame struct {
 	attempts  int
 	nextRetry time.Time // zero = due immediately
 	notBefore time.Time // not fetched or cached before this (see App.notBefore)
+	queued    uint64    // queue order (see App.queueSeq): the oldest go first when the queue is capped
 }
 
 // fetchBackoff returns the wait before retry number attempts+1.
@@ -205,7 +207,9 @@ type App struct {
 	fetchedGames    map[int]bool
 	pendingFetch    map[int]*pendingGame // finished games awaiting a safe (non-game) window
 	givenUpFetch    map[int]bool         // games abandoned after maxFetchAttempts
-	mu              sync.Mutex           // guards fetchedGames + pendingFetch + givenUpFetch + lastBusGame
+	queueSeq        uint64               // counts queueFetch additions (pendingGame.queued)
+	finishHold      map[int]time.Time    // bus-finished games held until GAME_FINISH_DELAY is over, queued or not
+	mu              sync.Mutex           // guards fetchedGames + pendingFetch + givenUpFetch + queueSeq + finishHold + lastBusGame
 	resultsMu       sync.Mutex           // serialises O-Zone results-API access
 	cmdBusy         atomic.Bool          // single-flight for command processing
 	collectBusy     atomic.Bool          // single-flight for a "collect from central" run
@@ -243,6 +247,10 @@ type App struct {
 	// site is the game server's system type, from GETSITEINFO (see
 	// siteinfo.go). Each connection starts it afresh.
 	site siteInfo
+	// ps tracks whether the print server answers (see printserver.go).
+	ps printServerPresence
+	// dialResults dials the print server: results.Dial, replaced in tests.
+	dialResults func(host, port string, timeout time.Duration) (*results.Client, error)
 
 	store  *store.Store   // local verbatim game cache (nil if disabled/unavailable)
 	cache  *cache.Cache   // O-Zone-shaped view over the store
@@ -275,6 +283,7 @@ func New(cfg config.Config) *App {
 		libWindow:   11 * time.Second,
 		followAfter: 60 * time.Second,
 		probe:       ozone.Probe,
+		dialResults: results.Dial,
 	}
 	if !cfg.OzoneDiscover {
 		a.setOzoneHost(cfg.OzoneHost)
@@ -328,6 +337,11 @@ func New(cfg config.Config) *App {
 		// In auto mode the address is set, and the bus started, once chosen.
 		a.bus = msgbus.New(a.ozoneAddr(), cfg.OzoneMsgBusPort, a.handleBusEvent)
 	}
+	// With results, the cache and the message bus all off nothing dials the
+	// print server on its own; an operator's command still may, and that
+	// says nothing about the venue, so the state stays "disabled".
+	a.ps.configure(cfg.PrintServerAbsentAfter, cfg.PrintServerRecheckMax,
+		!cfg.ResultsEnabled && a.store == nil && a.bus == nil, time.Now())
 	return a
 }
 
@@ -388,11 +402,21 @@ func (a *App) Overview() map[string]any {
 	overview["ozone_host"] = a.ozoneAddr()
 	// Frames discarded from the game server since the agent started.
 	overview["frames"] = a.frames.report()
+	// Whether the print server answers (same block as the self-report's).
+	overview["print_server"] = a.ps.report(time.Now())
 	return overview
 }
 
-// Resync triggers an idle-gated cache refresh in the background.
-func (a *App) Resync() { go a.refreshCache() }
+// Resync triggers an idle-gated cache refresh in the background. It is an
+// operator's request, so it dials even a print server treated as absent (once,
+// still only between games): a success brings it back.
+func (a *App) Resync() {
+	go func() {
+		if err := a.refreshCache(true); err != nil && !deferrable(err) {
+			log.Printf("[agent] cache: resync failed: %v", err)
+		}
+	}()
+}
 
 // Purge drops every cached game.
 func (a *App) Purge() (int, error) {
@@ -543,7 +567,7 @@ func (a *App) pollLoop(ctx context.Context, client *ozone.Client) {
 				go a.processCommands()
 			}
 			if a.store != nil {
-				go a.refreshCache()
+				go func() { _ = a.refreshCache(false) }()
 			}
 		}
 		a.health.MarkPoll()
@@ -827,6 +851,7 @@ func (a *App) collect(client *ozone.Client, slow bool) ([]byte, string, error) {
 			"results_pending":  pending,
 			"results_given_up": givenUp,
 			"frames":           a.frames.report(),
+			"print_server":     a.ps.report(time.Now()),
 		}
 		if a.lib != nil {
 			payload["agent"].(map[string]any)["lib"] = a.lib.Report()
@@ -945,8 +970,11 @@ func (a *App) checkGameResults(server map[string]any) {
 	if gameNum > 0 {
 		a.lastGameNum = gameNum
 	}
-	if finished > 0 && !a.isFetched(finished) {
-		a.queueFetch(finished)
+	// A game newly queued is a game that just ended: a print server treated
+	// as absent that answered earlier is checked at once (see gameFinished).
+	// Only newly: the server sits in mode 7 or 18 for poll after poll.
+	if finished > 0 && !a.isFetched(finished) && a.queueFetch(finished) {
+		a.ps.gameFinished(time.Now())
 	}
 
 	// Only ever touch the print server when it's safe to do so, and run the
@@ -1022,9 +1050,17 @@ func (a *App) fetchGameResults(gameNumber int) (deferred bool) {
 	}
 	defer a.resultsMu.Unlock()
 
-	if err := a.pullGameResults(gameNumber); err != nil {
+	if err := a.pullGameResults(gameNumber, false); err != nil {
 		if deferrable(err) {
 			return true // not now; retry in the next safe window, no attempt burnt
+		}
+		if errors.Is(err, errPrintServerAbsent) {
+			// The print server is not answering. The game stays queued with no
+			// attempt burnt and no line logged, and is not put off either:
+			// finish work retried on every poll would only find it absent
+			// again. It is drained once the print server answers (see
+			// onPrintServerBack).
+			return false
 		}
 		a.noteFetchFailure(gameNumber, err)
 		return false
@@ -1076,6 +1112,27 @@ func (a *App) resultsBacklog() (pending int, givenUp []int) {
 	return len(a.pendingFetch), givenUp
 }
 
+// pendingCount is the number of finished games waiting to be fetched.
+func (a *App) pendingCount() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return len(a.pendingFetch)
+}
+
+// onPrintServerBack resumes the work that waited while the print server was
+// treated as absent: every queued game becomes due (its attempts kept), and the
+// next poll that finds the gate open drains them and refreshes the cache (see
+// finishWork). notBefore is left alone: a game that has only just finished is
+// still not fetched before GAME_FINISH_DELAY is over.
+func (a *App) onPrintServerBack() {
+	a.mu.Lock()
+	for _, p := range a.pendingFetch {
+		p.nextRetry = time.Time{}
+	}
+	a.mu.Unlock()
+	a.finishPending.Store(true)
+}
+
 // resultsSession owns the print-server connection for a run of fetches — one
 // game or a whole backfill — and is the only place the agent dials the results
 // API.
@@ -1094,12 +1151,27 @@ func (a *App) resultsBacklog() (pending int, givenUp []int) {
 // one. Because a fresh dial is a new touch of the print server, it re-checks
 // the idle gate; and because a desync can in principle survive a clean read,
 // every payload is matched against the game number it reports for itself.
+//
+// manual marks a session an operator asked for (refetch_game, backfill_all,
+// resync_all, cache_resync, the admin Resync). It still waits for the gate,
+// but dials even a print server treated as absent: one press is one check.
 type resultsSession struct {
-	app  *App
-	conn *results.Client
+	app    *App
+	conn   *results.Client
+	manual bool
 }
 
-func (a *App) newResultsSession() *resultsSession { return &resultsSession{app: a} }
+func (a *App) newResultsSession(manual bool) *resultsSession {
+	return &resultsSession{app: a, manual: manual}
+}
+
+// dial opens a connection to the print server (see App.dialResults).
+func (a *App) dial(host, port string, timeout time.Duration) (*results.Client, error) {
+	if a.dialResults != nil {
+		return a.dialResults(host, port, timeout)
+	}
+	return results.Dial(host, port, timeout)
+}
 
 // connect returns a live connection, dialling one if there isn't a usable one
 // already. Every dial is gated on the print server being idle.
@@ -1116,9 +1188,39 @@ func (s *resultsSession) connect() (*results.Client, error) {
 	if err := s.app.printServerGate(); err != nil {
 		return nil, err
 	}
-	rc, err := results.Dial(host, s.app.cfg.OzoneResultsPort, 5*time.Second)
-	if err != nil {
+	// After the gate, never instead of it: a print server treated as absent
+	// is left alone by automatic work until its next check is due, and the
+	// check itself is a dial like this one, so it too only ever happens
+	// between games.
+	if err := s.app.ps.allow(time.Now(), s.manual); err != nil {
 		return nil, err
+	}
+	port := s.app.cfg.OzoneResultsPort
+	addr := net.JoinHostPort(host, port)
+	rc, err := s.app.dial(host, port, 5*time.Second)
+	if err != nil {
+		// Only a dial that failed with the gate still open counts against
+		// the print server: one that failed while it closed under it (the
+		// link dropped, a game started) says nothing about it. Automatic work
+		// then stands down if the print server is now treated as absent; an
+		// operator is told what the dial found.
+		if gateErr := s.app.printServerGate(); gateErr != nil {
+			// A check of a print server treated as absent, cut short by the
+			// gate, is "not now": the work is put off (the gate error is
+			// deferrable), so no attempt is used up and nothing is logged.
+			// Only while absent, so the other states behave as before.
+			if absent, _ := s.app.ps.queueing(); absent {
+				return nil, fmt.Errorf("%w (%w)", gateErr, err)
+			}
+			return nil, err
+		}
+		if s.app.ps.failed(addr, err, time.Now(), s.manual) && !s.manual {
+			return nil, fmt.Errorf("%w (%v)", errPrintServerAbsent, err)
+		}
+		return nil, err
+	}
+	if s.app.ps.reached(addr, time.Now(), s.app.pendingCount) {
+		s.app.onPrintServerBack()
 	}
 	// O-Zone pushes a fixed handshake (texts + event_types) on connect; consume
 	// it before issuing a command, or the reply would be the handshake instead.
@@ -1230,9 +1332,10 @@ func payloadGameNumber(raw []byte) (number int, isGame bool) {
 // central. Shared by the automatic finish detector and the command queue. It is
 // the single chokepoint for per-game print-server access: every caller gets the
 // idle-gate re-checked here, closing any window between an earlier check and
-// the actual connection.
-func (a *App) pullGameResults(gameNumber int) error {
-	s := a.newResultsSession()
+// the actual connection. manual is set for an operator's refetch_game (see
+// resultsSession).
+func (a *App) pullGameResults(gameNumber int, manual bool) error {
+	s := a.newResultsSession(manual)
 	defer s.retire()
 
 	raw, err := s.game(gameNumber)
@@ -1536,6 +1639,9 @@ func (a *App) handleBusEvent(ev msgbus.Event) {
 			a.queueFetch(g)
 			a.notBefore(g, time.Now().Add(a.cfg.GameFinishDelay))
 		}
+		// A print server treated as absent that answered earlier is checked
+		// by the drain after this game, once the delay is over.
+		a.ps.gameFinished(time.Now())
 		go a.afterFinish()
 	}
 }
@@ -1545,9 +1651,26 @@ func (a *App) handleBusEvent(ev msgbus.Event) {
 // finished writing it, whatever reaches it first: afterFinish waits the delay
 // out, but a drain or cache refresh a poll launches (finish work left pending
 // from an earlier game, results polling, the slow poll's refresh) need not.
+//
+// The hold is kept for a game that is not queued too (a print server treated
+// as absent that has not answered in this run queues nothing): should it
+// answer inside the delay, the cache refresh and a later queueFetch still
+// wait.
 func (a *App) notBefore(n int, t time.Time) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	now := time.Now()
+	for k, until := range a.finishHold {
+		if !now.Before(until) {
+			delete(a.finishHold, k)
+		}
+	}
+	if a.finishHold == nil {
+		a.finishHold = map[int]time.Time{}
+	}
+	if a.finishHold[n].Before(t) {
+		a.finishHold[n] = t
+	}
 	if p := a.pendingFetch[n]; p != nil && p.notBefore.Before(t) {
 		p.notBefore = t
 	}
@@ -1557,6 +1680,9 @@ func (a *App) notBefore(n int, t time.Time) {
 func (a *App) tooSoon(n int, now time.Time) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if now.Before(a.finishHold[n]) {
+		return true
+	}
 	p := a.pendingFetch[n]
 	return p != nil && now.Before(p.notBefore)
 }
@@ -1590,15 +1716,22 @@ func (a *App) finishWork() {
 	if a.drainPendingFetches() {
 		a.finishPending.Store(true)
 	}
-	a.refreshCache()
+	_ = a.refreshCache(false)
 }
 
 // refreshCache pulls the O-Zone game list and backfills the local cache with any
 // missing valid games. Cache-only (no central push), idle-gated, and serialised
-// behind the results mutex. Cheap to call repeatedly — it skips games it has.
-func (a *App) refreshCache() {
+// behind the results mutex. Cheap to call repeatedly — it skips games it has,
+// and while the print server is treated as absent it dials nothing until the
+// next check is due. manual is set for an operator's request (cache_resync, the
+// admin Resync): see resultsSession.
+//
+// It returns why the game list could not be read: the gate's refusal (which
+// defers), or the print server's error. What happens to single games after
+// that is logged, not returned.
+func (a *App) refreshCache(manual bool) error {
 	if a.store == nil {
-		return
+		return nil
 	}
 	if err := a.printServerGate(); err != nil {
 		if errors.Is(err, errLinkStale) {
@@ -1607,25 +1740,33 @@ func (a *App) refreshCache() {
 			// O-Zone link is down. Say so, or the refresh looks like a no-op.
 			log.Printf("[agent] cache: refresh deferred — %v", err)
 		}
-		return
+		return err
 	}
-	if !a.resultsMu.TryLock() {
-		return
+	// Automatic work skips a refresh already under way. An operator's waits
+	// for it, as refetch_game and backfill do, so it really tries and says
+	// how that went: the slow poll starts its own refresh beside the
+	// commands, and taking that for this one's success would ack a resync
+	// that never dialled. Waiting is safe: connect checks the gate again
+	// before it dials, and the game loop checks it before each game.
+	if manual {
+		a.resultsMu.Lock()
+	} else if !a.resultsMu.TryLock() {
+		return nil
 	}
 	defer a.resultsMu.Unlock()
 
-	sess := a.newResultsSession()
+	sess := a.newResultsSession(manual)
 	defer sess.retire()
 
 	listRaw, err := sess.list()
 	if err != nil {
-		return
+		return err
 	}
 	var list struct {
 		GameList []map[string]any `json:"gamelist"`
 	}
 	if err := json.Unmarshal(listRaw, &list); err != nil {
-		return
+		return err
 	}
 	for _, gm := range list.GameList {
 		a.upsertListEntry(gm)
@@ -1641,12 +1782,15 @@ func (a *App) refreshCache() {
 		}
 		// Stop immediately if a game starts mid-refresh.
 		if !a.safeForPrintServer(int(a.serverMode.Load())) {
-			return
+			return nil
 		}
 		raw, err := sess.game(num)
 		if err != nil {
-			if deferrable(err) {
-				return // a game started, or the link went stale, before reconnect
+			if deferrable(err) || errors.Is(err, errPrintServerAbsent) {
+				// A game started, or the link went stale, before reconnect; or
+				// the print server stopped answering and is now treated as
+				// absent (said once, by the tracker).
+				return nil
 			}
 			log.Printf("[agent] cache: refresh of game #%d failed: %v", num, err)
 			if errors.Is(err, errNotGameData) {
@@ -1659,7 +1803,7 @@ func (a *App) refreshCache() {
 			consecutive++
 			if consecutive >= maxBatchFetchErrors {
 				log.Printf("[agent] cache: refresh stopped after %d consecutive failures", consecutive)
-				return
+				return nil
 			}
 			continue
 		}
@@ -1667,6 +1811,7 @@ func (a *App) refreshCache() {
 		a.cacheGame(num, raw)
 	}
 	sess.acknowledge()
+	return nil
 }
 
 // cacheGame stores a verbatim "all" payload in the local cache and, when failover
@@ -1931,7 +2076,7 @@ func (a *App) runCommand(c push.Command) (string, map[string]any) {
 			return "failed", map[string]any{"error": "missing or invalid game_number"}
 		}
 		a.resultsMu.Lock()
-		err := a.pullGameResults(n)
+		err := a.pullGameResults(n, true)
 		a.resultsMu.Unlock()
 		if deferrable(err) {
 			// A game started between the command-queue gate and now, or the
@@ -1963,8 +2108,16 @@ func (a *App) runCommand(c push.Command) (string, map[string]any) {
 	case "cache_resync":
 		// Idle-gated cache refresh — the admin API's /resync. Listed in
 		// isResultsCommand so central re-queues it until the server is idle
-		// rather than running it during a live game.
-		a.refreshCache()
+		// rather than running it during a live game. An operator's request:
+		// it dials even a print server treated as absent, and says if the
+		// print server did not answer.
+		err := a.refreshCache(true)
+		if deferrable(err) {
+			return "deferred", map[string]any{"reason": err.Error()}
+		}
+		if err != nil {
+			return "failed", map[string]any{"error": err.Error()}
+		}
 		n := 0
 		if a.store != nil {
 			n = a.store.Count()
@@ -2010,11 +2163,18 @@ func (a *App) syncGames(payload map[string]any, force bool) (string, map[string]
 		return "deferred", map[string]any{"reason": err.Error()}
 	}
 
-	sess := a.newResultsSession()
+	// An operator's command: it dials even a print server treated as absent.
+	sess := a.newResultsSession(true)
 	defer sess.retire()
 
 	listRaw, err := sess.list()
 	if err != nil {
+		if deferrable(err) {
+			// A game started (or the link went stale) during the list's
+			// dial: put off, as a game starting mid-batch is, so central
+			// queues it again for the next safe window.
+			return "deferred", map[string]any{"reason": err.Error()}
+		}
 		return "failed", map[string]any{"error": err.Error()}
 	}
 	var list map[string]any
@@ -2113,21 +2273,64 @@ func (a *App) markFetched(n int) {
 	}
 }
 
-// queueFetch records a finished game awaiting a safe window to be fetched.
-// Re-queueing an already-pending game keeps its retry state (backoff must not
-// reset just because the finish was noticed again on a later poll).
-func (a *App) queueFetch(n int) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.givenUpFetch[n] {
-		return // abandoned after repeated failures; only refetch_game revives it
+// queueFetch records a finished game awaiting a safe window to be fetched, and
+// reports whether it was newly queued. Re-queueing an already-pending game
+// keeps its retry state (backoff must not reset just because the finish was
+// noticed again on a later poll).
+//
+// While the print server is treated as absent: if it has not answered once in
+// this run there is nothing to fetch from, so nothing is queued (the backlog
+// would only sit there, counted on Fleet, forever); if it answered earlier,
+// games keep queueing to be fetched when it is back, the newest
+// maxPendingWhileAbsent by queue order (game numbers can start again from 1),
+// the older ones dropped and counted.
+func (a *App) queueFetch(n int) bool {
+	absent, everReached := a.ps.queueing()
+	if absent && !everReached {
+		return false
 	}
-	if _, ok := a.pendingFetch[n]; !ok {
-		a.pendingFetch[n] = &pendingGame{}
+	a.mu.Lock()
+	if a.givenUpFetch[n] {
+		a.mu.Unlock()
+		return false // abandoned after repeated failures; only refetch_game revives it
+	}
+	_, had := a.pendingFetch[n]
+	if !had {
+		a.queueSeq++
+		a.pendingFetch[n] = &pendingGame{queued: a.queueSeq, notBefore: a.finishHold[n]}
+	}
+	dropped := 0
+	if absent {
+		dropped = a.capPendingLocked(maxPendingWhileAbsent)
 	}
 	if len(a.pendingFetch) > 500 {
 		a.pendingFetch = map[int]*pendingGame{n: a.pendingFetch[n]} // bound memory
 	}
+	a.mu.Unlock()
+	if dropped > 0 {
+		a.ps.addDropped(dropped)
+	}
+	return !had
+}
+
+// capPendingLocked drops the earliest-queued games until at most limit are
+// pending, and returns how many it dropped. a.mu must be held.
+func (a *App) capPendingLocked(limit int) int {
+	over := len(a.pendingFetch) - limit
+	if over <= 0 {
+		return 0
+	}
+	order := make([]int, 0, len(a.pendingFetch))
+	for n := range a.pendingFetch {
+		order = append(order, n)
+	}
+	sort.Slice(order, func(i, j int) bool {
+		return a.pendingFetch[order[i]].queued < a.pendingFetch[order[j]].queued
+	})
+	for _, n := range order[:over] {
+		delete(a.pendingFetch, n)
+	}
+	return over
 }
 
 func (a *App) clearPending(n int) {

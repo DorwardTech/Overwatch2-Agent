@@ -799,7 +799,7 @@ func TestABusFinishedGameIsNotCachedBeforeTheDelay(t *testing.T) {
 	a.handleBusEvent(msgbus.Event{Code: msgbus.EventGameFinish})
 	a.handleBusEvent(msgbus.Event{Code: msgbus.EventIdle}) // the gate opens inside the delay
 
-	a.refreshCache()
+	a.refreshCache(false)
 	if n := ps.Requests("all"); n != 0 {
 		t.Fatalf("game fetched %d time(s) for the cache inside the finish delay", n)
 	}

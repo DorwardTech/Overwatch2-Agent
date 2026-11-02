@@ -5,9 +5,11 @@ with the machine, needs nobody logged in, restarts itself if it fails, and
 keeps its own log. There is no Docker involved. It is the same agent as the
 container image — same settings, same behaviour — built for Windows.
 
-Install it on any always-on Windows machine on the venue LAN. The game server
-PC itself is the usual choice; the one thing to know about that is under
-[Running on the game server PC](#running-on-the-game-server-pc).
+Install it on any always-on Windows machine on the venue LAN. An O-Zone game
+server is a separate appliance that never runs the agent; see
+[The game server is a separate machine](#the-game-server-is-a-separate-machine).
+At a Nexus venue the agent runs on the Nexus server itself (see
+[Nexus venues](#nexus-venues-legacy-mode)).
 
 ## What you need
 
@@ -38,7 +40,7 @@ PC itself is the usual choice; the one thing to know about that is under
    > release before running it:
    >
    > ```powershell
-   > Get-FileHash .\overwatch-agent_1.9.2_windows_setup.exe -Algorithm SHA256
+   > Get-FileHash .\overwatch-agent_1.10.0_windows_setup.exe -Algorithm SHA256
    > ```
 
    The installer copies the agent to `C:\Program Files\Overwatch Agent\` and
@@ -62,8 +64,8 @@ PC itself is the usual choice; the one thing to know about that is under
    - **Where the games come from** — **O-Zone** unless you have been told this
      venue runs **Nexus**. The choice swaps the fields underneath it, because
      the two systems are read completely differently.
-     - *O-Zone*: **Game server address** — `127.0.0.1` if the agent is on the
-       game server itself, otherwise its address on the venue network. Not
+     - *O-Zone*: **Game server address** — its address on the venue network
+       (never `127.0.0.1`: the game server is a separate machine). Not
        sure of it? Press **Find O-Zone on the network**: the page listens for
        the game server's announcement for about 11 seconds and shows a card for
        each server it hears, with its address, site and arena. Nothing is
@@ -74,8 +76,6 @@ PC itself is the usual choice; the one thing to know about that is under
          fills in both the site and the arena, so the agent finds that server
          by itself and follows it to a new address (a venue where the game
          server's address comes from DHCP, say).
-       - A server on this computer offers **Use this computer (127.0.0.1)**
-         instead.
 
        If it finds nothing, it says what to check and offers **Listen again**;
        see [Troubleshooting](#troubleshooting). **Test this connection** too.
@@ -111,7 +111,7 @@ the identical agent:
    check it against `SHA256SUMS.txt` from the same release:
 
    ```powershell
-   Get-FileHash .\overwatch-agent_1.9.2_windows_amd64.zip -Algorithm SHA256
+   Get-FileHash .\overwatch-agent_1.10.0_windows_amd64.zip -Algorithm SHA256
    ```
 
 2. **Extract** it to `C:\Program Files\Overwatch Agent\`. Keep the executable
@@ -136,7 +136,7 @@ The installer itself takes the usual Inno Setup switches, so a scripted rollout
 can run it unattended:
 
 ```powershell
-.\overwatch-agent_1.9.2_windows_setup.exe /VERYSILENT /NORESTART
+.\overwatch-agent_1.10.0_windows_setup.exe /VERYSILENT /NORESTART
 ```
 
 A silent install registers and configures the service but does not open the
@@ -152,7 +152,7 @@ directly if you prefer. Open it from an elevated prompt, set at least:
 |---|---|
 | `CENTRAL_API_URL` | `https://ow2.lasertag.net.au/api/agent/ingest` |
 | `AGENT_TOKEN` | the site's token, `OW2_<id>_<secret>` |
-| `OZONE_WS_HOST` | `127.0.0.1` on the game server PC, otherwise its LAN IP — or `auto` to find it from its announcement |
+| `OZONE_WS_HOST` | the game server's LAN IP — or `auto` to find it from its announcement. Never `127.0.0.1`: the game server is a separate machine |
 | `OZONE_SID`, `OZONE_ARENA` | with `auto` only: the site and arena to follow, as **Find** or `overwatch-agent discover` shows them. Without them the agent uses the one server it hears, for that run only, and waits rather than guess when it hears more than one |
 
 For a Nexus venue, set `AGENT_MODE=legacy` with `NEXUS_DSN` and `LASERTAG_URL`
@@ -249,17 +249,17 @@ out of the database directly. Switching a venue between the two modes on the
 setup page leaves the other mode's settings in `agent.env` commented out rather
 than deleting them, so switching back restores what was there.
 
-## Running on the game server PC
+## The game server is a separate machine
 
-When the agent runs on the same machine as the game server, everything
-default just works: `OZONE_WS_HOST=127.0.0.1`, and no firewall rules beyond the
-one the installer adds. Keep `127.0.0.1` here rather than `auto`: **Find**
-recognises a server on this computer and offers exactly that.
+An O-Zone game server is an appliance of its own: it never runs Windows, and
+the agent never runs on it. The agent reaches it over the venue LAN only, so set
+`OZONE_WS_HOST` to its LAN IP (or `auto`), never `127.0.0.1`.
 
-The one exception is the optional **print-server proxy**. Its default listen
-address is port `12123`, which on the game server PC is the real print server's
-port, so the proxy cannot bind it. Give the proxy another port and point TORN
-(or whatever fetches scoresheets) at this machine and that port:
+The optional **print-server proxy** listens on the agent's own machine, port
+`12123` by default. Point TORN (or whatever fetches scoresheets) at this
+machine's LAN address instead of the game server's. If another program on this
+machine already uses `12123`, give the proxy another port and point TORN at
+that:
 
 ```
 ENABLE_CACHE=true
@@ -267,8 +267,13 @@ ENABLE_PROXY=true
 PROXY_LISTEN_ADDR=0.0.0.0:12124
 ```
 
-The cache and proxy are opt-in; leave them off unless the venue is being
-moved onto the cache.
+The cache and proxy are opt-in, and like the game results they need a print
+server on the game server; leave them off unless the venue is being moved onto
+the cache. At a venue whose game server has no print server, leave
+`ENABLE_GAME_RESULTS`, `ENABLE_CACHE` and `ENABLE_MSG_BUS` off. If they are on,
+the agent notices that nothing answers and stops trying except for a check
+between games (`PRINT_SERVER_ABSENT_AFTER`, `PRINT_SERVER_RECHECK_MAX`; see the
+README).
 
 ## Firewall
 
@@ -470,7 +475,7 @@ a terminal.
 | `install` says access denied | the prompt is not elevated |
 | site stays offline | the setup page's **Test this connection** buttons; in `agent.log` a wrong token is a `401` and a wrong host a `connect failed` |
 | the setup page will not open | it needs administrator rights — use the Start Menu entry, or run `overwatch-agent setup` from an elevated prompt |
-| proxy failed to start | port `12123` is the real print server's on this PC — set `PROXY_LISTEN_ADDR` |
+| proxy failed to start | another program on this machine already uses port `12123` — set `PROXY_LISTEN_ADDR` to another port and point TORN at it |
 | **Find** says it could not listen on UDP `12106` (*forbidden by its access permissions*) | another program on this PC holds the port without sharing it (the message names it when it can), or Windows has reserved the port: see **Sharing the port** above. Typing the address in still works |
 | **Find** found nothing | the firewall rule (`netsh advfirewall firewall show rule name="Overwatch Agent - O-Zone discovery (UDP 12106)"`) and the network profile (a profile set to block all incoming connections overrides the rule); whether this PC is on the same subnet and VLAN as the game server (the announcement does not cross a router); whether the game server is running. `overwatch-agent discover` runs the same check from a prompt. Typing the address in still works |
 

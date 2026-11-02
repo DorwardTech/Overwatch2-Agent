@@ -11,7 +11,7 @@ services:
       context: .
       args:
         # Stamp the built binary's version so it never reports "dev".
-        AGENT_VERSION: ${AGENT_VERSION:-1.9.2}
+        AGENT_VERSION: ${AGENT_VERSION:-1.10.0}
     # image: ghcr.io/dorwardtech/overwatch2-agent:latest
     restart: unless-stopped
     # OZONE_WS_HOST=auto finds O-Zone from the announcement it broadcasts on
@@ -44,16 +44,16 @@ services:
       # Pack IR bench readings buffered across restarts (only used when
       # PACK_IR_ADDR is set in .env).
       PACK_IR_BUFFER_FILE: /data/cache/pack-ir-buffer.json
-    # Lets the container reach an O-Zone server running on the Docker host via
-    # OZONE_WS_HOST=host.docker.internal (use the LAN IP instead if it's remote).
+    # Lets the container reach programs on the Docker host itself. O-Zone is a
+    # separate appliance, so set OZONE_WS_HOST to its LAN IP (or auto), never
+    # host.docker.internal.
     extra_hosts:
       - 'host.docker.internal:host-gateway'
     # Publish the print-server proxy for TORN (only meaningful with
     # ENABLE_PROXY=true). Defaults to localhost, which is safe; set
     # PROXY_PUBLISH_ADDR to the venue LAN IP so TORN on another machine can
-    # reach it. NEVER expose it to the public internet. If the real O-Zone
-    # print server already listens on this host's :12123, leave the proxy off
-    # or move this to another port.
+    # reach it. NEVER expose it to the public internet. If another program on
+    # this host already uses :12123, move this to another port.
     ports:
       - '${PROXY_PUBLISH_ADDR:-127.0.0.1}:12123:12123'
     # The rootfs is read-only, so every writable path the agent needs — the

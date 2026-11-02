@@ -3,6 +3,7 @@ package config
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 // The legacy startup line used to print NEXUS_DSN verbatim, putting the Nexus
@@ -200,5 +201,43 @@ func TestLegacyModeIgnoresAuto(t *testing.T) {
 	}
 	if cfg.OzoneDiscover {
 		t.Fatal("legacy mode turned discovery on")
+	}
+}
+
+// The print-server presence knobs: detection on by default after 3 failed
+// dials with a 15-minute cap; 0 turns it off; the cap stays within a minute
+// and an hour.
+func TestPrintServerPresenceSettings(t *testing.T) {
+	cases := []struct {
+		name, after, recheck string
+		wantAfter            int
+		wantRecheck          time.Duration
+	}{
+		{"defaults", "", "", 3, 15 * time.Minute},
+		{"off", "0", "", 0, 15 * time.Minute},
+		{"negative is off", "-2", "", 0, 15 * time.Minute},
+		{"set", "5", "1800", 5, 30 * time.Minute},
+		{"cap below a minute", "3", "10", 3, time.Minute},
+		{"cap above an hour", "3", "7200", 3, time.Hour},
+		{"malformed cap", "3", "15m", 3, 15 * time.Minute},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv("CENTRAL_API_URL", "https://ow2.example/api/agent/ingest")
+			t.Setenv("AGENT_TOKEN", "OW2_1_abc")
+			t.Setenv("PRINT_SERVER_ABSENT_AFTER", c.after)
+			t.Setenv("PRINT_SERVER_RECHECK_MAX", c.recheck)
+
+			cfg, err := Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.PrintServerAbsentAfter != c.wantAfter {
+				t.Errorf("PrintServerAbsentAfter = %d, want %d", cfg.PrintServerAbsentAfter, c.wantAfter)
+			}
+			if cfg.PrintServerRecheckMax != c.wantRecheck {
+				t.Errorf("PrintServerRecheckMax = %s, want %s", cfg.PrintServerRecheckMax, c.wantRecheck)
+			}
+		})
 	}
 }

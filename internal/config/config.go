@@ -63,6 +63,14 @@ type Config struct {
 	CacheRetention  time.Duration // prune cached games older than this
 	GameFinishDelay time.Duration // wait after game-finish before touching the print server
 
+	// Print-server presence: after PrintServerAbsentAfter consecutive failed
+	// dials (spread over at least 10 minutes) the print server is treated as
+	// absent, and automatic results and cache work stop dialling it except for
+	// a check between games, at most every PrintServerRecheckMax. 0 turns
+	// detection off. The ENABLE_* flags still decide whether anything dials.
+	PrintServerAbsentAfter int
+	PrintServerRecheckMax  time.Duration
+
 	// Transparent print-server proxy (what TORN connects to instead of O-Zone)
 	// and the token-protected admin/control HTTP API.
 	ProxyEnabled    bool   // serve the cached games over the O-Zone TCP protocol
@@ -164,6 +172,9 @@ func Load() (Config, error) {
 		CacheRetention:  time.Duration(envInt("CACHE_RETENTION_HOURS", 24)) * time.Hour,
 		GameFinishDelay: time.Duration(envInt("GAME_FINISH_DELAY", 15)) * time.Second,
 
+		PrintServerAbsentAfter: envInt("PRINT_SERVER_ABSENT_AFTER", 3),
+		PrintServerRecheckMax:  time.Duration(envInt("PRINT_SERVER_RECHECK_MAX", 900)) * time.Second,
+
 		ProxyEnabled:    envBool("ENABLE_PROXY", false),
 		ProxyListenAddr: env("PROXY_LISTEN_ADDR", "0.0.0.0:12123"),
 		AdminAddr:       env("ADMIN_API_ADDR", ""),
@@ -208,7 +219,34 @@ func Load() (Config, error) {
 		log.Printf("[agent] config: POLL_INTERVAL below 1s clamped to 1s")
 		c.PollInterval = time.Second
 	}
+	c.clampPrintServer()
 	return c, nil
+}
+
+// Bounds on PRINT_SERVER_RECHECK_MAX: no more often than a minute (the first
+// check's wait), no less than an hour.
+const (
+	minPrintServerRecheck = time.Minute
+	maxPrintServerRecheck = time.Hour
+)
+
+// clampPrintServer keeps the print-server presence settings in range, saying
+// so when it moves one.
+func (c *Config) clampPrintServer() {
+	if c.PrintServerAbsentAfter < 0 {
+		log.Printf("[agent] config: PRINT_SERVER_ABSENT_AFTER=%d is below 0 — using 0 (detection off)", c.PrintServerAbsentAfter)
+		c.PrintServerAbsentAfter = 0
+	}
+	switch {
+	case c.PrintServerRecheckMax < minPrintServerRecheck:
+		log.Printf("[agent] config: PRINT_SERVER_RECHECK_MAX=%d is below %d — clamped to %d seconds",
+			int(c.PrintServerRecheckMax/time.Second), int(minPrintServerRecheck/time.Second), int(minPrintServerRecheck/time.Second))
+		c.PrintServerRecheckMax = minPrintServerRecheck
+	case c.PrintServerRecheckMax > maxPrintServerRecheck:
+		log.Printf("[agent] config: PRINT_SERVER_RECHECK_MAX=%d is above %d — clamped to %d seconds",
+			int(c.PrintServerRecheckMax/time.Second), int(maxPrintServerRecheck/time.Second), int(maxPrintServerRecheck/time.Second))
+		c.PrintServerRecheckMax = maxPrintServerRecheck
+	}
 }
 
 // loadDiscovery reads OZONE_WS_HOST=auto and the announcement settings. In

@@ -243,7 +243,7 @@ func TestNothingReachesThePrintServerBeforeAChoice(t *testing.T) {
 	}
 	a.noteServerMode(1)
 	a.gameState.Store(stateIdle)
-	if _, err := a.newResultsSession().connect(); !errors.Is(err, errLinkStale) {
+	if _, err := a.newResultsSession(false).connect(); !errors.Is(err, errLinkStale) {
 		t.Fatalf("connect() = %v with no address, want errLinkStale", err)
 	}
 	a.queueFetch(9)
@@ -680,8 +680,8 @@ func TestTheGateClosesAsSoonAsAnotherServerIsHeard(t *testing.T) {
 	if a.safeForPrintServer(int(a.serverMode.Load())) {
 		t.Fatal("safeForPrintServer still says yes")
 	}
-	a.refreshCache() // what Resync runs
-	a.finishWork()   // what a finish timer runs: a queued game and finish work are pending
+	a.refreshCache(true) // what Resync runs
+	a.finishWork()       // what a finish timer runs: a queued game and finish work are pending
 	time.Sleep(300 * time.Millisecond)
 	if n := ps.Connections(); n != 0 {
 		t.Fatalf("the other server's print server was contacted %d time(s) between polls", n)

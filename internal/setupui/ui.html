@@ -123,11 +123,11 @@
     </div>
 
     <div id="ozoneBox" style="margin-top:16px">
-      <p class="hint">Where the game server runs. If the agent is installed on that same computer, use <code>127.0.0.1</code>. Not sure? <b>Find O-Zone on the network</b> lists every game server announcing itself here. Typing <code>auto</code> instead has the agent find the server by its announcement each time it starts.</p>
+      <p class="hint">The game server's address on the venue network. It is a separate machine and never runs the agent, so not <code>127.0.0.1</code>. Not sure? <b>Find O-Zone on the network</b> lists every game server announcing itself here. Typing <code>auto</code> instead has the agent find the server by its announcement each time it starts.</p>
       <div class="row">
         <div>
           <label for="ozoneHost">Game server address <span class="var">OZONE_WS_HOST</span></label>
-          <input id="ozoneHost" type="text" spellcheck="false" placeholder="127.0.0.1">
+          <input id="ozoneHost" type="text" spellcheck="false" placeholder="192.168.1.50">
         </div>
         <div class="narrow">
           <label for="ozonePort">Port <span class="var">OZONE_WS_PORT</span></label>
@@ -148,7 +148,6 @@
         <p class="advice">With <code>auto</code> the agent connects to the game server announcing this site and arena. Find O-Zone on the network shows both. Leave them empty only if this network has a single game server.</p>
       </div>
       <div class="links">
-        <button type="button" class="link" id="thisMachine">Use this computer (127.0.0.1)</button>
         <button type="button" class="link" id="find">Find O-Zone on the network</button>
       </div>
       <div class="msg" id="findMsg"></div>
@@ -186,6 +185,7 @@
       <input type="checkbox" id="results">
       <label for="results">Collect scoresheets after each game
         <span class="desc">Sends hit-zone and fitness data to Overwatch when a game finishes. Needs the scoresheet-printing licence on the game server.</span>
+        <span class="desc">This and the local copy below both need a print server on the game server. If it has none, untick both; left on, the agent notices that nothing answers and only checks again between games.</span>
       </label>
     </div>
 
@@ -447,7 +447,6 @@ $("reveal").addEventListener("click", () => {
   t.type = showing ? "password" : "text";
   $("reveal").textContent = showing ? "Show" : "Hide";
 });
-$("thisMachine").addEventListener("click", () => { $("ozoneHost").value = "127.0.0.1"; toggles(); });
 $("genAdmin").addEventListener("click", () => {
   const bytes = new Uint8Array(18);
   crypto.getRandomValues(bytes);
