@@ -117,7 +117,7 @@ func TestPullGameResultsRefusesDuringGame(t *testing.T) {
 	a, ps := newSimApp(t)
 	a.noteServerMode(6) // game in progress
 
-	if err := a.pullGameResults(9); err != errGameActive {
+	if err := a.pullGameResults(9, false); err != errGameActive {
 		t.Fatalf("err = %v, want errGameActive", err)
 	}
 	if ps.Connections() != 0 {
@@ -412,7 +412,7 @@ func TestPrintServerBusyCountAlwaysReturnsToZero(t *testing.T) {
 		a, ps := newSimApp(t)
 		_ = ps.Close() // dial fails; connect must not have counted anything
 
-		if err := a.pullGameResults(9); err == nil {
+		if err := a.pullGameResults(9, false); err == nil {
 			t.Fatal("pullGameResults succeeded against a closed print server")
 		}
 		if got := a.printServerBusy.Load(); got != 0 {

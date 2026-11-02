@@ -6,6 +6,79 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 The Site Agent and central Overwatch are versioned independently.
 
+## [1.10.0] — 2026-11-01
+
+The agent now notices a game server with no print server, or a print server
+that has stopped answering, and stops trying it after every game. Two new
+settings, both optional: the defaults suit every venue.
+
+### Added
+
+- **The agent notices a print server that does not answer.** Some game
+  servers have no print server. The agent used to try each finished game about
+  ten times over two hours, logging a timeout every time, and then give it up,
+  which Overwatch showed as abandoned results. The cache refresh also waited
+  out a five-second timeout every minute between games. Now, after 3 failed
+  connections in a row, spread over at least ten minutes, the agent treats the
+  print server as absent. It says so once in the log, stops fetching results
+  and refreshing the cache, and checks again now and then, only ever between
+  games: after a minute, then twice as long after each check that fails, up to
+  every 15 minutes, without logging. When the print server answers again, the
+  agent says so once and fetches the games that were waiting, oldest first.
+  The ten minutes are there for a power cut, when the game server's other
+  services can come back minutes before its print server.
+- **A game that ends checks a print server that answered earlier.** If the
+  print server answered earlier since the agent started and then stopped, the
+  agent checks it right after each game (once the finish delay is over, when
+  the message bus reports the finish), so a short outage costs no results.
+  Meanwhile finished games keep waiting, the newest 50. A print server that
+  has not answered since the agent started is not checked after every game,
+  and finished games are not kept waiting for it: there is nothing to fetch
+  them from. A game the message bus reports finished is never fetched before
+  the finish delay is over, even when the print server comes back inside it.
+- **A check never costs a waiting game anything.** A check that a starting
+  game cuts short is put off to the next gap between games: it uses up none
+  of a waiting game's tries and logs nothing, so a game waiting at a venue
+  without a print server is never given up. An operator's command cut short
+  the same way is deferred, and Overwatch sends it again.
+- **An operator's request always tries.** A re-fetch, backfill, resync or
+  cache resync from Overwatch, or Resync on the control panel, connects even
+  to a print server treated as absent, still only between games. If it
+  answers, the agent is back to normal at once; if not, the command says why.
+  A failed one never counts towards treating the print server as absent, so
+  an operator's tries cannot stop the automatic checks.
+- **The self-report says whether the print server answers**, as
+  `agent.print_server`, and so does `/api/overview`, as `print_server`:
+  `state` (`present`, `absent`, `unknown` until it first answers or is
+  treated as absent, or `disabled` when game results, the cache and the
+  message bus are all off),
+  `since`, `last_ok_at` (`null`
+  when it has not answered since the agent started), `failures`, `last_error`
+  (while absent), `next_check_s` and `dropped`. Overwatch 1.31.0 and later
+  show a venue with no print server as such, instead of as abandoned results.
+- **Two settings:** `PRINT_SERVER_ABSENT_AFTER`, the failed connections in a
+  row before the print server is treated as absent (default `3`; `0` turns
+  this off, and the agent behaves as before), and `PRINT_SERVER_RECHECK_MAX`,
+  the longest wait between checks in seconds (default `900`, kept between
+  `60` and `3600`). `ENABLE_GAME_RESULTS`, `ENABLE_CACHE` and `ENABLE_MSG_BUS`
+  still decide whether the agent uses the print server at all.
+
+### Changed
+
+- **A cache resync from Overwatch reports a failure.** When the print server
+  does not answer, the `cache_resync` command is now acked as failed, with the
+  connection error, instead of acked. One that meets a game in progress is
+  deferred, like the other commands that use the print server.
+- **The settings say what needs a print server.** The example settings (which
+  still turn game results on), the setup page's scoresheet and local-copy
+  boxes, and the README now say that they need a print server, and that a
+  venue without one should leave game results, the cache and the message bus
+  off. The setup page drops its **Use this computer (127.0.0.1)** button, and
+  its address hint and messages, the Windows guide, the example settings, the
+  README and the Docker Compose comments no longer say the agent can run on
+  the game server's own computer: the game server is a separate machine, and
+  the agent never runs on it.
+
 ## [1.9.2] — 2026-10-31
 
 A clearer message when the agent cannot listen for the game server's

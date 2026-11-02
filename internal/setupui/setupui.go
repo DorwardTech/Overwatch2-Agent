@@ -378,7 +378,7 @@ func (s settings) validate() []string {
 			problems = append(problems, problem)
 		}
 	} else if strings.TrimSpace(s.OzoneHost) == "" {
-		problems = append(problems, "The game server address is required (127.0.0.1 if the agent runs on that machine).")
+		problems = append(problems, "The game server address is required: its address on the venue network, or auto.")
 	}
 	// The site and arena only narrow auto's choice, and the page parks them when
 	// the address is fixed. A malformed one is refused either way: with auto the

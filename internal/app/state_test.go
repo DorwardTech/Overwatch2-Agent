@@ -362,7 +362,7 @@ func TestRefreshCacheRefusesOnAStaleLink(t *testing.T) {
 	a.gameState.Store(stateIdle)
 	ageServerMode(a, maxServerModeAge+time.Second) // ...as of a while ago
 
-	a.refreshCache()
+	a.refreshCache(false)
 
 	if ps.Connections() != 0 {
 		t.Fatalf("print server was contacted on a stale reading (connections=%d)", ps.Connections())
@@ -393,7 +393,7 @@ func TestRefreshCacheIdleGated(t *testing.T) {
 	active := New(cfg)
 	active.noteServerMode(6)
 	active.gameState.Store(stateActive)
-	active.refreshCache()
+	active.refreshCache(false)
 	if ps.Connections() != 0 {
 		t.Fatalf("print server must not be contacted during a game (connections=%d)", ps.Connections())
 	}
@@ -402,7 +402,7 @@ func TestRefreshCacheIdleGated(t *testing.T) {
 	idle := New(cfg)
 	idle.noteServerMode(1)
 	idle.gameState.Store(stateIdle)
-	idle.refreshCache()
+	idle.refreshCache(false)
 
 	if ps.Connections() == 0 {
 		t.Fatal("print server should have been contacted when idle")

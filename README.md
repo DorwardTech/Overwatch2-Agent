@@ -72,7 +72,9 @@ The per-architecture `.zip` archives are still published for scripted rollouts;
 switches.
 
 [WINDOWS.md](WINDOWS.md) is the full guide: where files live, the firewall,
-running on the game server PC itself, upgrading and troubleshooting.
+the print-server proxy, upgrading and troubleshooting. An O-Zone game server
+is a separate appliance: the agent runs on another machine on the venue LAN,
+never on it.
 
 ## Configuration
 
@@ -81,12 +83,14 @@ running on the game server PC itself, upgrading and troubleshooting.
 | `CENTRAL_API_URL` | ✅ | — | Full ingest endpoint, e.g. `https://ow2.lasertag.net.au/api/agent/ingest` |
 | `AGENT_TOKEN` | ✅ | — | This venue's token (`OW2_<id>_<secret>`), issued from the Sites screen |
 | `AGENT_MODE` | | `ozone` | Which system this venue runs: `ozone`, or `legacy` for a Nexus venue |
-| `OZONE_WS_HOST` | | `127.0.0.1` | O-Zone server host (ozone mode). Use `host.docker.internal` if it runs on the Docker host, or `auto` to find it from its LAN announcement (see [Finding O-Zone automatically](#finding-o-zone-automatically)) |
+| `OZONE_WS_HOST` | | `127.0.0.1` | O-Zone server host (ozone mode): its LAN IP, or `auto` to find it from its LAN announcement (see [Finding O-Zone automatically](#finding-o-zone-automatically)). O-Zone is a separate appliance, so never `localhost` or `host.docker.internal` |
 | `OZONE_WS_PORT` | | `12113` | O-Zone WebSocket port (ozone mode) |
 | `OZONE_SID` | | — | Auto mode only: use only the server announcing this site id (1–10 digits, compared as a number). Ignored, with a log line, with a fixed host |
 | `OZONE_ARENA` | | — | Auto mode only: use only this arena (0–255), compared exactly as the server announces it. Ignored, with a log line, with a fixed host |
 | `OZONE_LIB_PORT` | | `12106` | UDP port the announcement arrives on (advanced) |
 | `ENABLE_LIB_LISTENER` | | `true` | With a fixed `OZONE_WS_HOST`: listen for the announcement and report what is heard, without ever changing the host. `false` opens no socket. Auto mode always listens |
+| `PRINT_SERVER_ABSENT_AFTER` | | `3` | Failed connections to the print server in a row, spread over at least 10 minutes, after which it is treated as absent: results and cache refresh pause, and it is checked again only between games (see [A game server without a print server](#a-game-server-without-a-print-server)). `0` turns this off |
+| `PRINT_SERVER_RECHECK_MAX` | | `900` | Longest wait, in seconds, between checks of a print server treated as absent (kept between `60` and `3600`) |
 | `NEXUS_DSN` | legacy | — | Nexus database, `user:password@tcp(host:3306)/ng_system`. Read-only account |
 | `LASERTAG_URL` | legacy | — | On-box management app, at the folder it lives in — no trailing slash |
 | `GAME_SYNC_INTERVAL` | | `30` | Seconds between collections of finished Nexus games (legacy mode) |
@@ -218,6 +222,25 @@ many were waiting) and `unsettled_lost` (polls that lost a message mid-poll).
 Only the last one costs anything: such a poll cannot confirm the server state,
 so the print server stays off-limits until a clean poll. When it grows the log
 says so in a warning, at most every five minutes.
+
+### A game server without a print server
+
+Some O-Zone servers have no print server (nothing answers on `12123`). At such
+a venue leave `ENABLE_GAME_RESULTS`, `ENABLE_CACHE` and `ENABLE_MSG_BUS` off.
+If they are on, the agent notices: after `PRINT_SERVER_ABSENT_AFTER` failed
+connections in a row (3), spread over at least 10 minutes, it logs once that it
+is treating the print server as absent, stops fetching results and refreshing
+the cache, and checks again only between games: after a minute, then twice as
+long after each failed check, up to `PRINT_SERVER_RECHECK_MAX` (15 minutes).
+When it answers again the agent logs that once and fetches the games that were
+waiting. A game that ends while a print server that answered earlier is absent
+gets a check right after it; one that never answered since the agent started
+is not checked after every game, and finished games are not queued for it.
+A re-fetch, backfill or resync asked for from Overwatch or the control panel
+always tries, still only between games, and one that fails never counts
+towards treating the print server as absent. The state is in every self-report as
+`agent.print_server`, and in `/api/overview` as `print_server`. The `ENABLE_*`
+settings still decide whether the agent uses the print server at all.
 
 ## Build from source
 
