@@ -1,1050 +1,378 @@
 # Changelog — Overwatch Site Agent
 
-All notable changes to the Overwatch Site Agent are recorded here. The format is
-based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
-project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+What changed in each release of the Site Agent, the program that runs at each
+venue and sends its game server's data to Overwatch. The newest release is
+first.
 
-The Site Agent and central Overwatch are versioned independently.
+The Site Agent and Overwatch have their own version numbers.
 
-## [1.10.0] — 2026-11-01
+## [1.10.1] — 2026-11-11
 
-The agent now notices a game server with no print server, or a print server
-that has stopped answering, and stops trying it after every game. Two new
-settings, both optional: the defaults suit every venue.
-
-### Added
-
-- **The agent notices a print server that does not answer.** Some game
-  servers have no print server. The agent used to try each finished game about
-  ten times over two hours, logging a timeout every time, and then give it up,
-  which Overwatch showed as abandoned results. The cache refresh also waited
-  out a five-second timeout every minute between games. Now, after 3 failed
-  connections in a row, spread over at least ten minutes, the agent treats the
-  print server as absent. It says so once in the log, stops fetching results
-  and refreshing the cache, and checks again now and then, only ever between
-  games: after a minute, then twice as long after each check that fails, up to
-  every 15 minutes, without logging. When the print server answers again, the
-  agent says so once and fetches the games that were waiting, oldest first.
-  The ten minutes are there for a power cut, when the game server's other
-  services can come back minutes before its print server.
-- **A game that ends checks a print server that answered earlier.** If the
-  print server answered earlier since the agent started and then stopped, the
-  agent checks it right after each game (once the finish delay is over, when
-  the message bus reports the finish), so a short outage costs no results.
-  Meanwhile finished games keep waiting, the newest 50. A print server that
-  has not answered since the agent started is not checked after every game,
-  and finished games are not kept waiting for it: there is nothing to fetch
-  them from. A game the message bus reports finished is never fetched before
-  the finish delay is over, even when the print server comes back inside it.
-- **A check never costs a waiting game anything.** A check that a starting
-  game cuts short is put off to the next gap between games: it uses up none
-  of a waiting game's tries and logs nothing, so a game waiting at a venue
-  without a print server is never given up. An operator's command cut short
-  the same way is deferred, and Overwatch sends it again.
-- **An operator's request always tries.** A re-fetch, backfill, resync or
-  cache resync from Overwatch, or Resync on the control panel, connects even
-  to a print server treated as absent, still only between games. If it
-  answers, the agent is back to normal at once; if not, the command says why.
-  A failed one never counts towards treating the print server as absent, so
-  an operator's tries cannot stop the automatic checks.
-- **The self-report says whether the print server answers**, as
-  `agent.print_server`, and so does `/api/overview`, as `print_server`:
-  `state` (`present`, `absent`, `unknown` until it first answers or is
-  treated as absent, or `disabled` when game results, the cache and the
-  message bus are all off),
-  `since`, `last_ok_at` (`null`
-  when it has not answered since the agent started), `failures`, `last_error`
-  (while absent), `next_check_s` and `dropped`. Overwatch 1.31.0 and later
-  show a venue with no print server as such, instead of as abandoned results.
-- **Two settings:** `PRINT_SERVER_ABSENT_AFTER`, the failed connections in a
-  row before the print server is treated as absent (default `3`; `0` turns
-  this off, and the agent behaves as before), and `PRINT_SERVER_RECHECK_MAX`,
-  the longest wait between checks in seconds (default `900`, kept between
-  `60` and `3600`). `ENABLE_GAME_RESULTS`, `ENABLE_CACHE` and `ENABLE_MSG_BUS`
-  still decide whether the agent uses the print server at all.
-
-### Changed
-
-- **A cache resync from Overwatch reports a failure.** When the print server
-  does not answer, the `cache_resync` command is now acked as failed, with the
-  connection error, instead of acked. One that meets a game in progress is
-  deferred, like the other commands that use the print server.
-- **The settings say what needs a print server.** The example settings (which
-  still turn game results on), the setup page's scoresheet and local-copy
-  boxes, and the README now say that they need a print server, and that a
-  venue without one should leave game results, the cache and the message bus
-  off. The setup page drops its **Use this computer (127.0.0.1)** button, and
-  its address hint and messages, the Windows guide, the example settings, the
-  README and the Docker Compose comments no longer say the agent can run on
-  the game server's own computer: the game server is a separate machine, and
-  the agent never runs on it.
-
-## [1.9.2] — 2026-10-31
-
-A clearer message when the agent cannot listen for the game server's
-announcement. There is nothing to set up: no setting is new or changed, and
-nothing about when the agent uses the print server has changed.
-
-### Fixed
-
-- **"Could not listen… forbidden by its access permissions" now says why.**
-  On Windows, the setup page's **Find**, `overwatch-agent discover` and the
-  log showed only the system's error when UDP 12106 could not be opened. That
-  happens when another program on the computer holds the port without sharing
-  it, or when Windows has reserved the port (Hyper-V, WSL and Docker Desktop
-  can). The message now says so, names the program holding the port when it
-  can, and says what to do instead: free the port, or enter the game server's
-  address rather than finding it. On Linux the same applies to "address
-  already in use", without the program's name.
-
-## [1.9.1] — 2026-10-31
-
-The agent sends the game server's team list to central, so the live page can
-show each team in its real colour. There is nothing to set up: no setting is
-new or changed, and nothing about when the agent uses the print server has
-changed.
-
-### Fixed
-
-- **The team list was never sent.** The game server's `GETTEAMINFO` reply
-  carries its teams as `TEAMDETAILS`; the agent read `TEAMS`, which the game
-  server does not send, so every slow push went without one. The agent now
-  reads `TEAMDETAILS` (still `TEAMS` when a reply has no `TEAMDETAILS`) and
-  forwards it as `team_info`, as before: each team's name, colour number and
-  colour.
-- **Simulator:** answers `GETTEAMINFO` with `TEAMDETAILS`, and gives each team
-  its colour number.
-
-## [1.9.0] — 2026-10-29
-
-The agent tells central which system the game server runs. There is nothing
-to set up: no setting is new or changed, and nothing about when the agent uses
-the print server has changed.
-
-### Added
-
-- **The game server's system type, in every slow push**, as `site_info`:
-  `{"sysflag": 128}`. It is the system-type flag from the game server's own
-  site information (one bit per system: Phasor Strike, Helios Pro, Helios 2,
-  Begeara 3, Helios 3, or 0 for none), which central names on the
-  Sites page. Nothing else from that information is sent.
-  - **When it asks:** once a connection, at the first slow poll between
-    games, then once an hour. It never asks while a game is starting or
-    running, or on a poll it could not confirm, so a game server that does
-    not know the command costs one reply timeout an hour, between games, and
-    never holds up a poll during play.
-  - **Until it answers**, pushes carry no `site_info`, and central keeps
-    what it had.
-
-## [1.8.0] — 2026-10-25
-
-A quieter log when other programs use the game server, and the counts behind
-it in the self-report. There is nothing to set up: no setting is new or
-changed, and nothing about when the agent uses the print server has changed.
-
-### Added
-
-- **The self-report counts the messages the agent discards**, as
-  `agent.frames`, and so does `/api/overview`, as `frames`. `foreign` counts
-  replies to other programs' requests; `stale`, messages that arrived between
-  the agent's own requests; `overflow`, messages dropped because too many were
-  waiting; and `unsettled_lost`, polls that lost a message while they waited
-  for their replies. Each counts from when the agent started, across
-  reconnects.
-
-### Changed
-
-- **The once-a-minute "discarded" log line is gone.** The game server sends
-  every program's replies to every connection. So while another program used
-  it, the agent logged how many messages it had discarded about once a
-  minute, all day, from 1.6.5 on. That is normal, and the line buried the ones
-  that matter. Now the log explains it once, the first time it happens, then
-  sums it up at most once an hour, and only when something new was discarded.
-- **A warning when a poll loses a message.** A message lost while a poll waits
-  for its replies could have been the game server's status, so that poll
-  cannot confirm it, and the print server stays off-limits until a clean poll.
-  Of all the discards, only that one matters, and the log now warns about it,
-  at most every five minutes. Messages dropped between polls are only counted.
-
-## [1.7.1] — 2026-10-25
-
-Fixes for finding the game server with `auto`, for a computer clock that
-jumps, and for "Time left" at legacy venues. There is nothing to set up: no
-setting is new or changed.
-
-### Fixed
-
-- **A clock change could let `auto` choose the wrong server.** How long ago
-  each server was last heard was measured on the computer's clock. If that
-  clock jumped forward (a time sync, say), every server heard so far looked
-  gone at once, and the first one heard again could be chosen while another
-  was still on the network. Those times are now measured on a clock that a
-  change of time does not move. A server must also now be the only one heard
-  for 11 seconds in a row before it is chosen. If another server is heard in
-  that time, the agent waits again. Choosing at startup can therefore take a
-  few seconds longer: up to about 16 seconds rather than 11.
-- **While it waits, the agent says what it actually heard.** Before, every
-  wait except "more than one server" said it was waiting for an announcement,
-  with advice about host networking and the firewall, even when the network
-  was fine. Now the log and `/readyz` say what was heard. For example: a
-  server for site 0564 arena 0 was heard, but the arena setting asks for
-  arena 1. Or every announcement heard came from a different address than the
-  one it names, so set the game server address instead. Or one site and arena
-  is announced from two addresses. The networking advice is given only when
-  nothing at all was heard. Each message is logged when it changes, and again
-  every five minutes while it stands. The self-report still says `waiting`.
-- **A different server at the chosen address is noticed before anything uses
-  it.** With `auto`, if the machine at the chosen address starts announcing a
-  different site or arena, the agent restarts and chooses again. It used to
-  check only once a minute, after that poll's work had already started:
-  fetching finished games from the print server, running commands from
-  central, refreshing the cache, and sending the poll to central. Now every
-  poll checks first, as soon as the game server answers. The poll that
-  notices is dropped: nothing from it is sent, and nothing is started. The
-  print server is also off-limits from the moment the change is heard, even
-  between polls, so a Resync, a game-finished wait or work already under way
-  never reaches the other machine's print server. A "game finished" message
-  from that machine is ignored too. An agent with a fixed address is not
-  affected.
-- **The print-server safety check no longer trusts the computer's clock.**
-  The agent only uses the print server while a recent status reading says the
-  game server is between games. "Recent" was measured on the computer's
-  clock, so if the clock was set back, a reading taken before the agent lost
-  contact could look recent again. It is now measured on a clock that a change
-  of time does not move. That clock stops while a Linux computer is asleep, so
-  the computer's own clock must also agree the reading is recent: after the
-  agent's computer wakes, the print server stays off-limits until the agent
-  has read the game server's status again.
-- **Legacy (Nexus) venues: "Time left" showed the time played.** The agent
-  sent the seconds played where central expects the seconds left. It now
-  sends the game's length less the time played, and never less than zero.
-  When Nexus does not report how long the game is, the agent sends 0 rather
-  than guess.
-- A server heard again after more than 30 seconds of silence now starts
-  afresh: its earlier announcements no longer count towards hearing it twice.
-
-## [1.7.0] — 2026-10-24
-
-The agent can find the game server by itself. The game server announces its
-address, site and arena on the local network every few seconds (UDP 12106).
-Set the game server address to `auto` and the agent listens, chooses the
-server it hears, and connects to it. A fixed address works as before.
-
-### Added
-
-- **Game server address `auto`.** The agent listens for at least 11
-  seconds, long enough to hear every server on the network at least twice,
-  then connects to the one it heard. It never guesses. If it hears more than
-  one site or arena, or one server announced from two addresses, it waits and
-  logs what it heard. The site and arena settings narrow the choice to one
-  server. Without them the agent uses the single server it hears, and logs
-  that it is keeping to it for this run only. If nothing is heard it keeps
-  waiting, logs the usual reasons every five minutes, and `/readyz` says
-  why it is not ready.
-- **Only announcements that can be trusted count.** An announcement must come
-  from the address it names, and from a network this machine is directly
-  connected to. Anything else is listed in reports but never chosen.
-- **One address per run.** The address is chosen once, before the agent first
-  connects, and never changes while it runs. Nothing reaches the game server
-  or the print server before the choice is made.
-- **Following a server that moves.** Suppose the chosen server stops
-  answering for a minute and announces itself from a new address, and that
-  address answers a read-only status request. Then the agent restarts and
-  connects to the new address. A server that still answers is never left. If
-  the machine at the chosen address starts announcing a different site or
-  arena, the agent also restarts and chooses again. After any restart the
-  print server stays closed until the server reports that it is between
-  games. The reason for a restart is in the log.
-- **A listener that only reports, on by default with a fixed address.** The
-  agent also listens when its address is fixed, and reports what it hears:
-  the site, the arena and the game server's own clock. It never changes the
-  address. If the port cannot be opened the agent logs that and carries on.
-  The agent opens the port for sharing. A program on the same machine that
-  opens UDP 12106 afterwards without sharing it then fails to open it.
-  `ENABLE_LIB_LISTENER=false` turns the listener off. Docker agents on a bridge
-  network hear nothing: they report that they are listening, with no
-  announcements.
-- The self-report and the local admin overview carry a `lib` block: what the
-  listener heard, what it chose, and its counters. The admin page shows the
-  address in use and when the server was last heard, and lists the servers
-  heard while the agent cannot choose.
-- **`overwatch-agent discover [--seconds N]`** lists the servers heard on the
-  network, with site, arena, address, sender and clock, and says which one
-  `auto` would choose. It only listens. In a container, run it with
-  `docker exec <agent> /agent discover`.
-- **Setup page: Find on the network.** It shows a card for each server heard,
-  and whether it answered. **Use this address** fills in the address;
-  **Follow it if its address changes** fills in `auto` with the site and
-  arena. Nothing is filled in until you press a button. **Test** works with
-  `auto` too.
-- **Windows:** the installer adds an inbound firewall rule for UDP 12106,
-  limited to the agent's program and the local subnet, and uninstalling
-  removes it. If the rule cannot be added, the install still succeeds and
-  prints the command to add it by hand.
-
-### Changed
-
-- The agent refuses to connect to an empty address. Before, it connected to
-  this machine.
-- The setup page's **Test** never sends a request to the print server's port,
-  even when that port is typed in as the game server's.
-- `/readyz` says why while the agent is not ready.
-- A health endpoint that cannot open its port is logged.
-
-## [1.6.5] — 2026-10-24
-
-Completes 1.6.4's reply matching, which was never published: everything in it
-ships here. A reply now has to arrive after the request it answers, so a reply
-left waiting since an earlier request cannot be taken for a new one. A poll
-whose replies arrive out of step, or that fails part-way, can no longer let the
-agent near the print server.
-
-### Fixed
-
-- **A reply left waiting since the previous poll could pass for a new one.**
-  1.6.4 matched replies by the request name the game server repeats in each
-  one. A server-state reply that arrived between polls (another client's, or
-  a duplicate) still carried the right name, so the next poll could take it
-  for its own. If it said "between games" while a game had since started, the
-  agent cleared the game it knew about and the print server became reachable
-  during play. The agent now reads the connection continuously, never
-  pausing, and notes when each message arrives, and a reply counts only if it
-  arrived after its request was written. Up to 64 messages wait to be looked
-  at; past that, new ones are dropped, so memory stays bounded.
-- **A poll could leave the print server reachable on an out-of-date
-  reading.** A server state saying a game is starting or under way takes
-  effect the moment it arrives, wherever it turns up: as the reply, beside
-  it, or after the poll has finished. A slow or failed second reply cannot
-  hold it back. A reading that says "between games" opens the print server, or
-  marks a game finished, only once both of the poll's replies are in and
-  agree; until then the print server stays as the last poll left it, so work
-  already under way between games is not cut short by each poll. The
-  messages dropped during the poll are checked, and so is the reply taken for
-  the pack list, in case the server state came back in its place. If one of
-  them could be the server state, or a message was dropped unread, the poll
-  is unsettled: its reading is used if it says a game is on, and the poll
-  cannot mark a game finished or allow the print server until a clean poll
-  does. Duplicates that say the same thing, and replies to other requests, do
-  not count, so a game server that repeats itself still lets finished games
-  be fetched. After a game starts, as the message bus or such a reading
-  reports it, the next poll's "between games" reading cannot mark the game
-  finished on its own; the poll after that can. That way another client's
-  reading from before the start, delivered late, cannot undo it. A poll that
-  fails part-way leaves the print server off-limits.
-
-### Changed
-
-- The once-a-minute log line counts each kind of discarded message: replies
-  to another request, messages that arrived before the request they could
-  have answered, and messages dropped because too many were waiting.
-- Work on the print server held back because the last poll could not confirm
-  the server state says so, and is retried after the next clean poll. During
-  a game it still says a game is in progress. While it waits on a reading
-  that says the game server is idle, the agent polls at the in-game rate, so
-  that clean poll comes sooner.
-- A finished game's follow-up (fetching what the message bus queued, and
-  refreshing the cache) that finds the print server off-limits, or has to
-  put a game off part-way, runs at the next poll that finds it open, instead
-  of waiting for another game to end. A game is still never fetched before
-  `GAME_FINISH_DELAY` has passed since the message bus reported it finished.
-
-## [1.6.4] — 2026-10-23
-
-Two fixes for an agent that lost data it already had. The game server's
-replies are matched to the request they answer, so telemetry no longer goes
-out without its packs. The container image keeps its cache and unsent
-telemetry on the volume mounted for them, with no settings for a Docker volume
-(a host directory owned by root needs `chown` first). Not published: its
-fixes ship in 1.6.5.
-
-### Fixed
-
-- **The reply to one request could be taken as the answer to another.** The
-  agent sent a request to the game server and took the next message back as
-  its reply, without checking which request that message answered. With
-  several clients connected to one game server, messages stopped lining up
-  with requests. At one venue about half of the pushes went out with the pack
-  list, the game list or the team list where the server state belonged, and no
-  packs. That telemetry was lost, and central showed the venue as "Idle, game
-  #0". The agent now checks the request name the game server repeats in every
-  reply and discards messages that answer a different request, within the same
-  10-second wait. A reply without a request name is still accepted. Once a
-  minute the log says how many messages were discarded, if any were.
-- **A container deployed without the compose files kept its state where a
-  redeploy wipes it.** The game cache went to `./cache` inside the container,
-  and both spill files (unsent telemetry and pack-IR readings) were switched
-  off. A Coolify "Docker image" application is one example, even with a volume
-  at `/data/cache`. Each redeploy then downloaded the whole cache from central
-  again and dropped any telemetry buffered during an outage. The image now
-  ships `/data/cache` owned by the user the agent runs as, and the agent uses
-  it by default whenever it can write there. The cache goes in `/data/cache`,
-  with `buffer.json` and `pack-ir-buffer.json` beside it, as the compose files
-  set them. A Docker volume mounted there works with no settings. A host
-  directory owned by root is not used: the agent keeps the old defaults rather
-  than switch the cache off, and logs which directory to `chown` to 65532.
-  `CACHE_DIR`, `BUFFER_FILE` and `PACK_IR_BUFFER_FILE` still override all of
-  this, and Windows is unchanged.
-
-## [1.6.3] — 2026-10-23
-
-Rebuilt with Go 1.26.10 for security fixes in Go's standard library. Nothing in
-the agent's own code changes. Docker venues pull the 1.6.3 image; Windows venues
-run the 1.6.3 installer.
+A security update. Docker venues pull the 1.10.1 image; Windows venues run the 1.10.1 installer.
 
 ### Security
 
-- **Built with Go 1.26.10.** Go 1.25, which built 1.6.2, is no longer
-  supported, and its last release (1.25.14) has twelve standard-library
-  vulnerabilities that the agent's code reaches: in the HTTP client and server
-  (GO-2026-6603, 6605, 6610, 6611, 6612, 6613, 6617), `net/textproto`
-  (GO-2026-6608), TLS (GO-2026-6607), certificate verification (GO-2026-6809)
-  and the setup page's HTML templates (GO-2026-6599, 6600). All are fixed in
-  1.26.10. The Windows build still runs on Windows 10 / Server 2016 or later.
-- `filippo.io/edwards25519` 1.1.1 (GO-2026-4503; the agent never called the
-  affected code).
+- **Built with Go 1.26.11.** It fixes a known problem in Go, the language the agent is written in, that could crash a program serving web pages. The agent serves its setup page and health check that way. Nothing else changes.
+
+## [1.10.0] — 2026-11-01
+
+The agent now copes with a game server that has no print server, or a print server that has stopped answering. Two new settings, both optional: the defaults suit every venue.
+
+### Added
+
+- **The agent notices a print server that does not answer.** Some game servers have no print server. The agent used to try each finished game about ten times over two hours, logging a timeout every time, then give up, and Overwatch showed the results as abandoned. Now, after 3 failed connections in a row, spread over at least ten minutes, the agent treats the print server as absent. It says so once in the log, and stops fetching results and refreshing its local copy of games. The ten minutes allow for a power cut, when the game server's other services can come back minutes before its print server.
+- **It keeps checking quietly, between games only.** The first check is after a minute, then the wait doubles after each failed check, up to every 15 minutes, with nothing in the log. When the print server answers again, the agent says so once and fetches the games that were waiting, oldest first.
+- **A short outage costs no results.** If the print server answered earlier since the agent started and then stopped, the agent checks it again after each game ends, once the finish delay (`GAME_FINISH_DELAY`) is over. Meanwhile the newest 50 finished games wait to be fetched. A print server that has not answered at all since the agent started is not checked after every game, and finished games are not kept waiting for it, because there is nothing to fetch them from. A finished game is never fetched before the finish delay is over, even if the print server comes back during it.
+- **A check never costs a waiting game anything.** If a game starts during a check, the check is put off to the next gap between games. It uses up none of a waiting game's tries and logs nothing, so a game waiting at a venue without a print server is never given up. An operator's command cut short the same way is put off, and Overwatch sends it again.
+- **An operator's request always tries.** A re-fetch, backfill, resync or cache resync sent from Overwatch, or **Resync cache** on the agent's own admin page, connects even to a print server treated as absent, still only between games. If it answers, the agent is back to normal at once. If not, the command says why. A failed request never counts towards treating the print server as absent.
+- **Overwatch can show whether the print server answers.** The agent now reports the print server as present, absent, unknown (until it first answers or is treated as absent) or disabled (when game results, the cache and the message bus are all off). Overwatch 1.31.0 and later show a venue with no print server as such on **Fleet** and the site's **Live** page, instead of as abandoned results.
+- **Two new settings:**
+  - `PRINT_SERVER_ABSENT_AFTER`: how many failed connections in a row before the print server is treated as absent. Default `3`. `0` turns this off, and the agent behaves as before.
+  - `PRINT_SERVER_RECHECK_MAX`: the longest wait between checks, in seconds. Default `900`, kept between `60` and `3600`.
+  - `ENABLE_GAME_RESULTS`, `ENABLE_CACHE` and `ENABLE_MSG_BUS` still decide whether the agent uses the print server at all.
 
 ### Changed
 
-- The agent now builds with Go 1.26's defaults. The ones that could show are
-  the setup page rejecting a host with a stray colon outside brackets (such an
-  address could never be reached anyway), TLS offering additional post-quantum
-  key exchange groups, and Go 1.26's new garbage collector. Building from source
-  needs Go 1.26 or later.
+- **Resync cache on Admin → Game cache now reports a failure** when the print server does not answer, with the connection error, instead of reporting success. One that meets a game in progress is put off, like the other commands that use the print server.
+- **The settings say what needs a print server.** The example settings (which still turn game results on), the setup page's **Collect scoresheets after each game** and **Keep a local copy of finished games, and serve them to the scoresheet printer** boxes, and the README now say they need a print server. A venue without one should leave game results, the cache and the message bus off.
+- **The setup page no longer has a Use this computer (127.0.0.1) button.** The game server is a separate machine, and the agent never runs on it. The setup page's hints and messages, the Windows guide, the example settings, the README and the Docker Compose comments no longer say otherwise.
+
+## [1.9.2] — 2026-10-31
+
+A clearer message when the agent cannot listen for the game server's announcement. There is nothing to set up.
+
+### Fixed
+
+- **"Could not listen… forbidden by its access permissions" now says why.** On Windows, the setup page's **Find**, `overwatch-agent discover` and the log used to show only the system's error when UDP port 12106 could not be opened. That happens when another program on the computer holds the port without sharing it, or when Windows has reserved the port (Hyper-V, WSL and Docker Desktop can). The message now says so, names the program holding the port when it can, and says what to do instead: free the port, or enter the game server's address rather than finding it.
+- On Linux the same applies to "address already in use", without the program's name.
+
+## [1.9.1] — 2026-10-31
+
+Team colours for the live page. There is nothing to set up.
+
+### Fixed
+
+- **The game server's team list was never sent.** The agent looked for the teams in the wrong place in the game server's reply, so every update went without them. It now sends each team's name, colour number and colour, so the **Live** page can show each team in its real colour.
+
+## [1.9.0] — 2026-10-29
+
+There is nothing to set up.
+
+### Added
+
+- **The agent tells Overwatch which system the game server runs:** Phasor Strike, Helios Pro, Helios 2, Begeara 3, Helios 3, or none. Overwatch names it on the **Sites** page. Nothing else from the game server's site information is sent.
+- **It asks only between games:** once per connection, then once an hour. It never asks while a game is starting or running. A game server that does not know the request costs one short wait an hour, between games, and never holds up the agent during play.
+- Until the game server answers, Overwatch keeps what it had.
+
+## [1.8.0] — 2026-10-25
+
+A quieter log when other programs use the game server. There is nothing to set up.
+
+### Added
+
+- **The agent's status report counts the messages it discards**, from when the agent started: replies to other programs' requests, messages that arrived between the agent's own requests, messages dropped because too many were waiting, and readings that lost a message while waiting for their replies.
+
+### Changed
+
+- **The once-a-minute "discarded" log line is gone.** The game server sends every program's replies to every connection. So while another program used it, the agent logged how many messages it had discarded about once a minute, all day, from 1.6.5 on. That is normal, and the line buried the ones that matter. Now the log explains it once, the first time it happens, then sums it up at most once an hour, and only when something new was discarded.
+- **A warning when a reading loses a message.** A message lost while the agent waits for the game server's replies could have been the game server's status. The agent then cannot confirm whether a game is on, so it keeps off the print server until a clean reading. This is the only discard that matters, and the log now warns about it, at most every five minutes. Other discarded messages are only counted.
+
+## [1.7.1] — 2026-10-25
+
+Fixes for finding the game server with `auto`, for a computer clock that jumps, and for "Time left" at legacy venues. There is nothing to set up.
+
+### Fixed
+
+- **A clock change could make `auto` choose the wrong server.** If the computer's clock jumped forward (after a time sync, say), every server heard so far looked gone at once, and the first one heard again could be chosen while another was still on the network. A change of time no longer affects this. A server must also now be the only one heard for 11 seconds in a row before it is chosen. If another server is heard in that time, the agent waits again. Choosing at startup can therefore take a few seconds longer: up to about 16 seconds rather than 11.
+- **While it waits, the agent says what it actually heard.** Before, almost every wait said it was waiting for an announcement, with advice about host networking and the firewall, even when the network was fine. Now the log and the readiness check (`/readyz`) say what was heard. For example:
+  - a server for site 0564 arena 0 was heard, but the arena setting asks for arena 1;
+  - every announcement heard came from a different address than the one it names, so set the game server address instead;
+  - one site and arena is announced from two addresses.
+
+  The networking advice is given only when nothing at all was heard. Each message is logged when it changes, and again every five minutes while it stands.
+- **A different server at the chosen address is noticed before anything uses it.** With `auto`, if the machine at the chosen address starts announcing a different site or arena, the agent restarts and chooses again. It used to check only once a minute, after work had already started: fetching finished games from the print server, running commands from Overwatch, refreshing the cache and sending updates. Now every reading checks first, and nothing from the reading that notices is sent or started. The print server is off-limits from the moment the change is heard, so nothing reaches the other machine's print server. A "game finished" message from that machine is ignored too. An agent with a fixed address is not affected.
+- **The print-server safety check no longer trusts the computer's clock.** The agent only uses the print server while a recent status reading says the game server is between games. If the computer's clock was set back, an old reading could look recent again. A change of time no longer affects this. After the agent's computer wakes from sleep, the print server stays off-limits until the agent has read the game server's status again.
+- **Legacy (Nexus) venues: "Time left" showed the time played.** The agent now sends the game's length less the time played, never less than zero. When Nexus does not report how long the game is, the agent sends 0 rather than guess.
+- A server heard again after more than 30 seconds of silence now starts afresh: its earlier announcements no longer count towards hearing it twice.
+
+## [1.7.0] — 2026-10-24
+
+The agent can find the game server by itself. The game server announces its address, site and arena on the local network every few seconds (UDP port 12106). Set the game server address to `auto` and the agent listens, chooses the server it hears, and connects to it. A fixed address works as before.
+
+### Added
+
+- **Game server address `auto`.** The agent listens for at least 11 seconds, long enough to hear every server on the network at least twice, then connects to the one it heard. It never guesses. If it hears more than one site or arena, or one server announced from two addresses, it waits and logs what it heard.
+  - The site and arena settings narrow the choice to one server. Without them, the agent uses the single server it hears, and logs that it is keeping to it for this run only.
+  - If nothing is heard, it keeps waiting, logs the likely reasons every five minutes, and the readiness check (`/readyz`) says why it is not ready.
+- **Only announcements that can be trusted count.** An announcement must come from the address it names, and from a network this computer is directly connected to. Anything else is listed but never chosen.
+- **One address per run.** The address is chosen once, before the agent first connects, and does not change while it runs. Nothing reaches the game server or its print server before the choice is made.
+- **Following a server that moves.** If the chosen server stops answering for a minute, announces itself from a new address, and that address answers a read-only status request, the agent restarts and connects to the new address. A server that still answers is never left. If the machine at the chosen address starts announcing a different site or arena, the agent also restarts and chooses again. After any restart the print server stays off-limits until the game server reports it is between games. The log gives the reason for each restart.
+- **The agent also listens with a fixed address, on by default.** It only reports what it hears (the site, the arena and the game server's own clock) and never changes the address. If the port cannot be opened, the agent logs that and carries on.
+  - The agent opens the port for sharing. A program on the same computer that opens UDP 12106 afterwards without sharing it will then fail to open it.
+  - `ENABLE_LIB_LISTENER=false` turns the listener off.
+  - Docker agents on a bridge network hear nothing: they report that they are listening, with no announcements.
+- **The agent's admin page** shows the address in use and when the server was last heard, and lists the servers heard while the agent cannot choose. The agent's status report to Overwatch also says what it heard and chose.
+- **`overwatch-agent discover [--seconds N]`** lists the servers heard on the network, with site, arena, address, sender and clock, and says which one `auto` would choose. It only listens. In a container, run it with `docker exec <agent> /agent discover`.
+- **Setup page: Find on the network.** It shows a card for each server heard, and whether it answered. **Use this address** fills in the address. **Follow it if its address changes** fills in `auto` with the site and arena. Nothing is filled in until you press a button. **Test** works with `auto` too.
+- **Windows:** the installer adds an inbound firewall rule for UDP 12106, limited to the agent's program and the local subnet, and uninstalling removes it. If the rule cannot be added, the install still succeeds and prints the command to add it by hand.
+
+### Changed
+
+- The agent refuses to connect to an empty address. Before, it connected to this computer.
+- The setup page's **Test** never sends a request to the print server's port, even when that port is typed in as the game server's.
+- The readiness check (`/readyz`) says why while the agent is not ready.
+- A health check that cannot open its port is now logged.
+
+## [1.6.5] — 2026-10-24
+
+Includes everything from 1.6.4, which was never published, and finishes its work. The agent is stricter about which replies from the game server it trusts, so a mixed-up reply can no longer let it near the print server during a game.
+
+### Fixed
+
+- **An old reply could make the agent miss that a game had started.** 1.6.4 matched each reply to its request by name, but a status reply left waiting from earlier (another program's, or a duplicate) could still pass for a new one. If it said "between games" while a game had since started, the agent forgot the game and the print server became reachable during play. A reply now counts only if it arrived after the agent's request.
+- **The agent is more careful before it uses the print server.** A reading that a game is starting or under way takes effect the moment it arrives. A reading that the game server is between games opens the print server, or marks a game finished, only once both of that round's replies are in and agree. If the agent cannot be sure of a reading (a message was lost, or another reply could have been the status), it still acts on it if it says a game is on, but it will not mark a game finished or use the print server until a clean reading. A reading that fails part-way keeps the print server off-limits. A game server that repeats itself still lets finished games be fetched.
+
+### Changed
+
+- The once-a-minute log line about discarded messages counts each kind: replies to another request, messages that arrived before the request they could have answered, and messages dropped because too many were waiting.
+- When the agent holds back print-server work because it could not confirm the game server's state, it now says so, and tries again after the next clean reading. During a game it still says a game is in progress. While it waits, the agent reads the game server at the in-game rate, so that clean reading comes sooner.
+- If a finished game's follow-up (fetching its results and refreshing the cache) finds the print server off-limits, or has to stop part-way, it now runs as soon as the print server is clear, instead of waiting for another game to end. A game is still never fetched before `GAME_FINISH_DELAY` has passed since the game server's message bus reported it finished.
+
+## [1.6.4] — 2026-10-23
+
+Never published: these fixes reached venues in 1.6.5.
+
+### Fixed
+
+- **Updates could go out without their packs.** With several programs connected to one game server, the agent could take the reply to one request as the answer to another. At one venue about half of the updates went out with no packs. That telemetry was lost, and Overwatch showed the venue as "Idle, game #0". The agent now checks which request each reply answers, and discards the ones that answer a different request. Once a minute the log says how many messages were discarded, if any were.
+- **A container deployed without the compose files lost its cache and unsent telemetry on every redeploy.** A Coolify "Docker image" application is one example, even with a volume at `/data/cache`. Each redeploy downloaded the whole cache from Overwatch again and dropped any telemetry held during an outage.
+  - The agent now keeps its cache, unsent telemetry and unsent pack-IR readings in `/data/cache` by default whenever it can write there, as the compose files set them. A Docker volume mounted there works with no settings.
+  - A host directory owned by root is not used: the agent keeps the old defaults, and logs which directory to `chown` to 65532.
+  - `CACHE_DIR`, `BUFFER_FILE` and `PACK_IR_BUFFER_FILE` still override all of this. Windows is unchanged.
+
+## [1.6.3] — 2026-10-23
+
+A security update. Docker venues pull the 1.6.3 image; Windows venues run the 1.6.3 installer.
+
+### Security
+
+- **Built with Go 1.26.10.** Go 1.25, which built 1.6.2, is no longer supported, and its last release has twelve known vulnerabilities in parts the agent uses: its web connections, secure connections (TLS), certificate checking and the setup page. All are fixed in 1.26.10.
+- One other library the agent includes was updated for a security fix. The agent never used the affected part.
+
+### Changed
+
+- The setup page now rejects an address with a stray colon outside square brackets. Such an address could never be reached anyway.
+
+### Notes
+
+- The Windows build still runs on Windows 10 / Server 2016 or later.
+- Building the agent from source now needs Go 1.26 or later.
 
 ## [1.6.2] — 2026-09-25
 
 ### Fixed
 
-- **The sample that reports a game has ended could be thrown away.** The end of
-  a game is the exact moment the recording interval widens, because the agent is
-  no longer in play — so the poll that *discovers* the game has ended was
-  measured against the new, wider idle interval and rejected for arriving too
-  soon after the last one. At a venue recording every second in play and every
-  thirty seconds idle, the state change could sit undelivered for most of a
-  minute, and central would go on showing a game still in progress. Nothing else
-  would have carried it: a change of state does not queue anything of its own.
-
-  A poll that reports a different server state is now always recorded. The
-  throttle exists to skip samples that say the same thing as the one before;
-  this one says something new by definition. The exemption is one-shot, so the
-  idle rate resumes immediately afterwards.
+- **Overwatch could show a game still running after it had ended.** When a game ends, the agent switches to its slower between-games rate, and the reading that saw the game end could be skipped as too soon. At a venue recording every second in play and every 30 seconds between games, the change could take most of a minute to reach Overwatch. A reading that shows a change of state is now always sent, and the slower rate resumes straight after.
 
 ## [1.6.1] — 2026-09-25
 
-### Fixed
-
-- **A queued batch could be discarded without ever being sent.** Delivery moved
-  onto its own goroutine in 1.6.0, which is what took the push off the polling
-  clock — but it also meant a batch could now be queued *while* another was in
-  flight. The send buffer is bounded and drops oldest-first, so the batch being
-  sent is exactly the one capacity evicts; the drain then removed the batch that
-  had taken its place at the head, which had not been sent. Nothing logged it
-  and nothing retried it: the telemetry was simply gone, and only while the
-  buffer was full enough to be evicting — that is, during an outage, when the
-  queued data is the only record of what happened.
-
-  The drain now removes a batch only if it is still the one it sent. While
-  delivery ran on the polling goroutine this could not happen, so the window
-  opened and closed inside 1.6.0 and no released build is affected.
+Behind-the-scenes improvements. Nothing changes for you.
 
 ## [1.6.0] — 2026-09-25
 
-The venue asked for one-second telemetry during a game. The agent had been
-configured for it for months and was delivering 2.4 seconds, and no setting
-could have fixed that — the push was on the critical path.
+Telemetry now arrives at the rates you set. A venue set to one-second readings during games was getting one every 2.4 seconds, and no setting could fix it.
 
 ### Fixed
 
-- **The push no longer blocks the next poll.** `pollLoop` reset its timer only
-  *after* `deliver()` returned, and `deliver()` blocks on an HTTPS round trip to
-  central over the public internet. The real sampling period was therefore
-  `interval + game-server round trips + central's latency`, never the interval alone.
-  At Laserzone Sunshine Coast, configured at 1s, that measured **2.4s** in
-  production — and central's response time, not the config, was setting the
-  in-game rate.
-
-  Batches now go to a delivery goroutine that owns every push for the life of the
-  process. The poll loop's only job is to read the game server and hand the bytes over.
-
-  The goroutine starts before the dial loop and outlives every reconnect, which
-  is a fix in its own right: the drain used to be reachable only from `pollLoop`,
-  so buffered telemetry sat undelivered while the agent was failing to reach the
-  box — exactly when the buffer matters most.
-
-- **Idle telemetry is no longer dragged to the fast rate by print-server work.**
-  `nextPollInterval()` returns the fast interval whenever `printServerBusy > 0`,
-  because `collect()` is the only thing that ever discovers a game has started
-  and that gate must stay current. That is a safety property and it stays — but
-  it was pulling telemetry along with it. One cache refresh a minute was enough
-  to make a nominal 15s idle cadence average **7.9s** in production, because
-  every one of those safety polls also wrote a row.
-
-  `telemetryInterval()` now separates *how often to look* from *how often to
-  record*, so the agent can watch closely while sampling at the rate the venue
-  asked for.
-
-  A **slow** poll is never throttled: it is the only payload carrying team info,
-  the game list, licences and the agent's own self-report, and dropping one would
-  blind central's agent-health view for a minute at a time.
+- **Sending to Overwatch no longer delays the next reading.** The agent waited for Overwatch to answer each update before it read the game server again, so the real rate was the interval plus the time that round trip took. At one venue set to 1 second, that measured 2.4 seconds. Updates are now sent separately, and readings keep to the interval.
+- **Held telemetry is sent while the agent is reconnecting.** Telemetry buffered during an outage used to wait until the agent reached the game server again. It is now sent to Overwatch even while the agent cannot reach the game server.
+- **Between-games telemetry keeps to its own rate during print-server work.** While the agent works with the print server it watches the game server at the fast rate, so it notices a game starting. That used to record telemetry at the fast rate too: one cache refresh a minute was enough to make a 15-second between-games rate average 7.9 seconds. The agent still watches closely, but now records at the rate the venue asked for. The fuller report the agent sends about once a minute (team info, the game list, licences and the agent's own status) is never skipped, so Overwatch's view of the agent's health stays current.
 
 ### Notes
 
-- `IDLE_POLL_INTERVAL` at or above 30s crosses central's default `Agent offline`
-  threshold, and `config.go` warns about it at startup. Raise that alert rule
-  **before** raising the interval, or the site flaps offline in between.
+- `IDLE_POLL_INTERVAL` at or above 30 seconds crosses Overwatch's default **Agent offline** alert threshold, and the agent warns about it at startup. Raise that alert rule **before** raising the interval, or the site flaps offline in between.
 
 ## [1.5.1] — 2026-09-05
 
 ### Fixed
 
-- **The agent no longer goes blind for fifteen seconds while it is touching the
-  print server.** The rule the whole results path is built around is that the
-  print server is never contacted during a game, and every operation re-checks
-  that immediately before it connects. But the check reads a value that only the
-  telemetry poll ever writes, so it can never be more current than the last poll
-  — and when the venue is idle the agent polls every fifteen seconds.
-
-  So a game starting just after an idle reading stayed invisible for up to that
-  long, and a results drain or a whole-venue backfill would keep opening NEW
-  fetches straight through the gap. 1.1.2 closed the version of this that could
-  last for an entire multi-game drain; what was left behind it was the gap
-  between two polls.
-
-  The agent now polls at the in-game rate for as long as it has print-server
-  work in progress. The blind spot shrinks from the idle interval to the active
-  one — fifteen seconds to five on the default settings. It cannot reach zero:
-  an operation already in flight still runs to its timeout, which is a separate
-  and known limitation. What this bounds is how long after play begins a NEW one
-  can start.
-
-  The cost is that the agent also pushes telemetry at the in-game rate for that
-  window. A results drain is seconds; a backfill is minutes, and an operator
-  asks for those one at a time.
+- **A game starting during print-server work is noticed sooner.** The agent never contacts the print server during a game, and checks just before each connection. But between games it read the game server only every 15 seconds, so a game starting just after a reading could go unnoticed for up to that long, while a results fetch or a backfill kept starting new requests. The agent now reads the game server at the in-game rate while it has print-server work in progress: every 5 seconds instead of 15 on the default settings. A request already under way still runs until it finishes or times out.
+- The agent also sends telemetry at the in-game rate during that time. Fetching results takes seconds; a backfill takes minutes, and an operator asks for one at a time.
 
 ## [1.5.0] — 2026-09-04
 
 ### Changed
 
-- **A new venue set up through the wizard gets the local game cache.** The
-  checkbox that turns it on started unticked, and the person installing at a
-  venue is whoever is on shift — they have no reason to tick a box nobody told
-  them about. So a Windows venue installed the easy way ended up with no local
-  copy of its finished games, nothing answering the printing software while play
-  was on, and nothing to restore from after an outage. The three things the
-  cache exists for, all off, silently.
-
-  It starts ticked now. Only for a venue that has never been configured: a venue
-  that has been through the page before has an explicit `ENABLE_CACHE` in its
-  file either way and keeps whatever it was set to, and the page writes the
-  choice out rather than relying on a default, so nothing changes underneath a
-  venue that already decided.
-
-  **The agent's own default is untouched and stays off.** That one governs every
-  agent in the fleet at its next upgrade, including the Linux venues nobody
-  asked — a venue being configured is a different thing from a venue already
-  running, and only the first is what this changes. There is a test for each.
-
-  The box turns on a listener for the printing software, so the page and
-  WINDOWS.md now both say so where the choice is made, for a machine that should
-  open no ports.
+- **The setup page turns on the local game cache for a new venue.** The box started unticked, so a Windows venue installed the easy way had no local copy of its finished games, nothing answering the printing software during play, and nothing to restore from after an outage. It now starts ticked, but only for a venue that has never been configured. A venue that has been through the setup page before keeps its `ENABLE_CACHE` setting, whatever it was.
+- **The agent's own default stays off**, so updating an agent, including at Linux venues, does not turn the cache on.
+- **The setup page and the Windows guide say the box opens a listener for the printing software**, for a computer that should open no ports.
 
 ## [1.4.0] — 2026-09-04
 
+Nexus venues can now be set up from the setup page.
+
 ### Added
 
-- **Legacy (Nexus) venues can be set up from the setup page.** The agent has
-  read Nexus venues for as long as it has read current ones —
-  `AGENT_MODE=legacy` with `NEXUS_DSN` and `LASERTAG_URL` — and that code has
-  always built and run on Windows. What did not exist was any way to *say so* on
-  a Windows machine short of hand-editing `agent.env`, which is the exact job
-  the installer and the setup page were built to remove.
-
-  Worse than absent: the page actively refused. It required a game server
-  address whatever the venue ran, and a Nexus venue does not have one, so the
-  form could not be submitted at all. A legacy venue installed through the
-  wizard hit a validation error it could not satisfy.
-
-  The page now asks which system the venue runs, and the answer swaps what it
-  shows: a current venue is asked for its game server, a Nexus venue for its
-  database and its management app. Both get a **Test** button that proves the
-  connections before anything is saved — for Nexus that is one press covering
-  both, reported separately, because a database grant and a web server are
-  different problems with different fixes.
-
-  The starter `agent.env` and WINDOWS.md now describe the mode and its settings
-  rather than assuming there is only one kind of venue.
+- **The setup page now works for Nexus venues.** Before, it always asked for a game server address, which a Nexus venue does not have, so the form could not be saved. A Nexus venue had to be set up by editing `agent.env` by hand.
+- **The page asks which system the venue runs** and shows the fields for that system. A venue on the current game system is asked for its game server. A Nexus venue is asked for its **Nexus database** (`NEXUS_DSN`) and its **management app address** (`LASERTAG_URL`), with `AGENT_MODE=legacy`.
+- **Both choices have a test button** that checks the connections before anything is saved. For Nexus, one press checks the database and the management app and reports each one separately, because they go wrong for different reasons and need different fixes.
+- The starter `agent.env` and the Windows guide (WINDOWS.md) now explain both kinds of venue and their settings.
 
 ### Changed
 
-- **Switching a venue between modes parks the other mode's settings rather than
-  deleting them.** Saving a current venue comments out `NEXUS_DSN` instead of
-  removing it, and the reverse for the game server settings, so a venue's
-  database password survives someone opening the setup page — and switching
-  back turns the same line on again with what was there before.
-
-- The scoresheet, cache, proxy and message-bus options are hidden for a Nexus
-  venue. They were always ignored in that mode — there is no print server at a
-  Nexus venue — but the page offered them as though they did something.
-
-- `AGENT_MODE` is now written explicitly on every save. It was previously left
-  out when it matched the default, so the file did not say which system the
-  venue ran and the reader had to know what the default was.
+- **Switching a venue between the two systems keeps the other system's settings.** They are commented out instead of deleted. So a Nexus venue's database password survives someone saving the setup page, and switching back turns the same settings on again with their old values.
+- For a Nexus venue, the page hides the scoresheet, cache, proxy and message bus options. They never did anything at a Nexus venue.
+- `AGENT_MODE` is now always written to the file when you save, so the file shows which system the venue runs. Before, it was left out when it matched the default.
 
 ### Fixed
 
-- **`AGENT_MODE` is read case-insensitively, and trimmed.** It was compared
-  exactly, so `AGENT_MODE=Legacy` — or the same word with a stray space, both
-  easy to write in a hand-edited file — was silently taken as a current venue.
-  No error, no warning: just the wrong half of the agent running against a venue
-  that has nothing for it to talk to. The setup page reads the same file, so the
-  two had to agree on what the word means.
+- **`AGENT_MODE` no longer cares about capital letters or stray spaces.** Before, `AGENT_MODE=Legacy`, or `legacy` with a stray space, was quietly treated as a venue on the current game system, with no error or warning. The agent then tried to reach a game server the venue does not have.
 
 ## [1.3.3] — 2026-09-02
 
 ### Added
 
-- **An installer for Windows.** Getting the agent onto a venue's Windows machine
-  ended, until now, in an elevated PowerShell prompt: extract an archive to the
-  right folder, open a terminal as administrator, change directory, type a
-  command. The person doing that is whoever is on shift, and every one of those
-  steps is a way for the install to go wrong quietly — the archive extracted to
-  a Downloads folder the service account cannot read, the prompt not actually
-  elevated, the command typed into the wrong directory.
+- **A Windows installer.** Download `overwatch-agent_<version>_windows_setup.exe` and double-click it. You no longer need to extract an archive and type commands into an administrator PowerShell prompt.
+- The installer puts the agent in *Program Files* and then sets it up exactly as the manual install does: the same service, the same locked-down data folder, the same starter configuration and the same Start Menu entry. When it finishes, it offers to open the setup page, so the whole job is one download and one form.
+- One installer covers both x64 and Arm64 machines and installs the right build, so there is nothing to choose.
+- **To upgrade, run the newer installer.** It stops the agent, replaces it and starts it again. It does not ask for the venue's settings again.
+- **To uninstall, use Settings → Apps.** It asks before deleting the site token, cached games and logs.
 
-  `overwatch-agent_<version>_windows_setup.exe` replaces all of it with a file
-  to double-click. It puts the agent in *Program Files*, where the service
-  account can read it, and then runs exactly the same registration step the
-  hand install runs — same service, same locked-down data directory, same
-  starter configuration, same Start Menu entry. When it finishes it offers to
-  open the setup page, so the whole job is one download and one form.
+### Notes
 
-  One installer covers both x64 and Arm64 machines and installs the build the
-  machine can run, so there is no architecture to choose. Upgrading is running
-  the newer one: it stops the agent, replaces it and starts it again, and never
-  asks for the venue's settings a second time. Uninstalling is in Settings →
-  Apps like anything else, and it asks before deleting the site's token, cached
-  games and logs rather than assuming.
-
-  The per-architecture archives are still published for scripted rollouts, and
-  the installer takes the usual silent switches for the same purpose.
-
-  It is not signed with a certificate, so Windows SmartScreen will warn the
-  first time it is run; WINDOWS.md says so plainly and gives the checksum to
-  verify against instead.
+- The separate x64 and Arm64 archives are still published for scripted rollouts, and the installer accepts the usual silent-install switches.
+- The installer is not signed with a certificate, so Windows SmartScreen warns the first time you run it. The Windows guide (WINDOWS.md) explains this and gives the checksum to check the file against.
 
 ## [1.3.2] — 2026-09-02
 
 ### Fixed
 
-- **A game restored from Overwatch is now checked against the game it claims to
-  be.** The agent already refused a payload from the venue's game server that
-  named a different game — the connection those arrive on can lose its place,
-  and one game's scores filed under another game's number is the one cache
-  error that never heals: the agent sees the game as present, so it never
-  fetches the real one, and the scoresheet software is served the wrong game
-  under the right number for as long as the cache keeps it.
-
-  The same payload can also arrive the other way — restored from Overwatch when
-  a venue box is rebuilt, or pulled in by hand with **Collect from Overwatch** —
-  and that route was trusted without the check. Overwatch's copy is filled by
-  agents, including agents old enough to have had the fault, so a game stored
-  there under the wrong number would have been copied straight back into the
-  rebuilt cache and stayed. Both routes now apply the same rule, and it is
-  written down once rather than twice.
-
-  A rejected payload is logged and skipped, not stored. The game's details are
-  kept, so the agent knows the game exists and fetches it properly from the
-  venue's own server at the next refresh. A payload that names no game number at
-  all is still accepted: only one that positively identifies as a different game
-  is refused.
+- **Games restored from Overwatch are now checked before they go into the cache.** This covers a cache restored when a venue box is rebuilt, and games pulled in with **Collect from Overwatch**. If a game's data says it is a different game from the number it was stored under, the agent logs it and skips it. Before, a game stored in Overwatch under the wrong number could be copied back into the cache, and scoring software would be given the wrong game's results under that number for as long as the cache kept it.
+- A skipped game is fetched properly from the venue's game server at the next refresh. Game data that names no game number at all is still accepted.
 
 ## [1.3.1] — 2026-09-02
 
-### Fixed
+### Security
 
-- **A redirect can no longer carry the site token somewhere else.** The agent
-  identifies itself to Overwatch with a token in a header of its own. When a
-  redirect crosses to another host, Go strips the headers it recognises as
-  credentials — but not one of ours, so it was carried to whatever host the
-  redirect named. A mistyped address, a lapsed domain or somebody else's
-  HTTP-to-HTTPS redirector was enough to hand a venue's token to a stranger.
-
-  Overwatch never answers with a redirect, so one means the address is not
-  Overwatch. The agent now treats it that way: nothing is sent on to the new
-  location, and the redirect is reported like any other unexpected answer.
+- **The agent no longer passes its site token on through a redirect.** If the Overwatch address answered with a redirect to another server, for example because of a mistyped address or a lapsed domain, the agent sent its site token on to that server. Overwatch never redirects, so the agent now sends nothing on and reports the redirect as an unexpected answer.
 
 ### Changed
 
-- **The setup page checks an address before it dials it.** Saving already
-  refused an Overwatch address that was not a web address; the test button did
-  not, so pressing it on a pasted fragment produced whatever low-level error
-  came back from the attempt. Both now apply the same rule, and the page names
-  the part that is wrong: a missing `https://`, a missing server name, a
-  username and password left in the address, a port typed into the address
-  field, or a port outside 1–65535.
+- **The setup page checks the Overwatch address before testing it.** Before, pressing the test button on a partly pasted address gave a confusing low-level error. Now the test and the save check the address the same way, and the page says what is wrong: a missing `https://`, a missing server name, a username and password left in the address, a port typed into the address field, or a port outside 1–65535.
 
 ## [1.3.0] — 2026-09-02
 
 ### Added
 
-- **A setup page, so nobody has to edit a configuration file.** Installing the
-  agent at a venue ended in the one step most likely to go wrong: open a text
-  file as an administrator, type an address, a token and a host into it without
-  breaking the syntax, and then read a log to find out whether any of it was
-  right. The person doing that is whoever is on shift.
-
-  `overwatch-agent setup` — and, on Windows, an **Overwatch Agent Setup** entry
-  the installer adds to the Start Menu — opens a page in the browser with a form
-  instead. It has a button that tests the connection to Overwatch and says which
-  of the three possible problems it found: the address is wrong, the token was
-  rejected, or the server could not be reached at all. It has another that
-  connects to the venue's game server and reports what it answered. It saves the
-  settings, installs or restarts the agent, and shows the log so the operator
-  can watch it come up. Nothing about it needs a command prompt.
-
-  Testing Overwatch reads the site's pending command queue rather than sending a
-  push: it proves the address, the network and the token together, while filing
-  no invented game data against the venue. Testing the game server uses the
-  read-only telemetry connection the agent already polls; the print server is
-  never touched, so the test is safe to press during a game.
-
-  Saving keeps the file the operator was given. Their comments stay, settings
-  the form does not show — a legacy database connection, say — stay, and a
-  setting switched off is commented out with its value intact rather than
-  deleted, so switching it back on restores it.
-
-  The page is only reachable from the machine it runs on: it listens on the
-  loopback address, admits only the browser it was opened in, refuses requests
-  addressed to anything but this computer's own address, and closes when the
-  operator presses Finish or leaves it half an hour. It writes the site token,
-  so the data directory is secured before it starts, whether or not the service
-  has been installed yet.
+- **A setup page, so nobody has to edit a configuration file.** Run `overwatch-agent setup`, or on Windows open **Overwatch Agent Setup** from the Start Menu. A form opens in your browser. No command prompt is needed.
+- **Test the connection to Overwatch.** The button says which of three problems it found: the address is wrong, the token was rejected, or the server could not be reached at all. The test only reads from Overwatch, so it records no made-up game data against the venue.
+- **Test the connection to the game server.** The button connects to the venue's game server and shows what it answered. It never touches the game server's print server, so it is safe to press during a game.
+- **Save and start.** The page saves the settings, installs or restarts the agent, and shows the agent's log so you can watch it come up.
+- **Saving keeps your file.** Your comments stay, and so do settings the form does not show, such as a Nexus database connection. A setting you switch off is commented out with its value kept, so switching it back on restores it.
+- The page can only be opened on the machine it runs on, and only in the browser it was opened in. It closes when you press **Finish**, or after it has been left for half an hour. Because it writes the site token, the data folder is locked down before the page starts.
 
 ## [1.2.1] — 2026-09-02
 
 ### Security
 
-- **An unreadable server state could be mistaken for an idle one.** The venue's
-  game server reports its current mode, and the agent stores that number in a
-  narrower form than it arrives in. A value too large to fit was silently cut
-  down to size rather than rejected — and some large values cut down to exactly
-  the number that means "idle", which is what the agent checks before it may
-  read from the game server. A game server sending nonsense, or something on
-  the venue network impersonating one, could therefore have opened that door
-  during a live game. An out-of-range value is now recorded as a state the
-  agent recognises as neither idle nor in-game, so it stays shut: not being
-  able to read the state is not the same as reading that it is idle. The same
-  bound is applied where the numbers are first read, so no field can carry a
-  value too large for where it is stored — the mode is simply the one where the
-  consequence was worst.
+- **A garbled state reading from the game server can no longer be taken as "idle".** The agent reads from the game server only when it reports it is idle. Some out-of-range values could be misread as "idle", so a faulty game server, or a device on the venue network pretending to be one, could have let the agent read from the game server during a live game. A state the agent cannot read is now treated as neither idle nor in a game, so the agent keeps waiting.
 
 ### Changed
 
-- **The cache stopped rewriting thousands of unchanged files a minute.** The
-  agent re-lists every game the venue's game server holds once a minute and
-  rewrote one small file per listed game each time, whether or not anything
-  about it had changed — steady write wear on the venue box's storage for no
-  new information. Unchanged entries are now left alone. They are still
-  refreshed periodically, because that timestamp is also what decides when an
-  old game leaves the cache, and games the venue is still playing must not age
-  out — there is a test for exactly that.
-- **Backing up finished games to Overwatch no longer scales its memory with the
-  backlog.** Each backup took its own full copy of the game's data the moment
-  it was queued, so a bulk re-sync of a rebuilt cache could hold hundreds of
-  copies at once inside an agent limited to 128 MB, competing with the buffer
-  that exists to survive an outage. Backups now read the data when their turn
-  comes, four at a time.
-
+- **The game cache no longer rewrites unchanged files every minute.** This cuts wear on the venue box's storage.
+- **Backing up a large number of finished games to Overwatch no longer uses more memory the bigger the backlog**, for example when a rebuilt cache is re-synced.
 
 ## [1.2.0] — 2026-09-02
 
+The agent now runs on Windows.
+
 ### Added
 
-- **The agent now runs on Windows, as a Windows service.** Until now the only
-  way to run the agent was the container image, which meant a Linux box or a
-  Docker installation at every venue. The same agent now installs itself as a
-  Windows service on any Windows PC on the venue LAN — the game server PC
-  itself is the obvious one — starts with the machine with nobody logged in,
-  restarts if it fails, and keeps its own log. Nothing else is different: the
-  settings, the behaviour and the rules that keep it away from the game
-  server during play are the same code, built for Windows.
-
-  `overwatch-agent.exe install` registers the service to run as the
-  low-privilege *Local Service* account rather than as an administrator,
-  creates the data directory under `C:\ProgramData\Overwatch Agent`, restricts
-  it to administrators and the service — it holds the site token and, with
-  the cache on, the venue's game data — and writes a configuration template
-  there. `start`, `stop`, `restart`, `status` and `uninstall` do what they
-  say. A *Reboot agent* command from Overwatch stops the agent cleanly and the
-  service control manager starts it again, as the container runtime does.
-  Starting, stopping and a failed start are recorded in the Windows
-  Application event log. `WINDOWS.md` is the guide.
-
-  The installer holds the venue's data to the same standard the container did:
-  it takes ownership of the data directory and restricts it to administrators,
-  the system and the service's own identity — not to the shared *Local Service*
-  account every other Windows service of that kind runs as. It refuses to do
-  that to a folder that is not the agent's own, so a drive root or a shared
-  folder passed by mistake is rejected rather than quietly locked down. The
-  service records its data directory on its own command line, so it can never
-  end up reading a different one than the install prepared.
-
-  A configuration the agent cannot use is a **failed start**, not a service
-  that reports success and stops a second later: the settings are read and
-  checked before Windows is told the service is running, and the reason is in
-  the event log. A stop that takes a moment — the agent finishes what it is
-  doing and writes out unsent telemetry — keeps telling Windows it is making
-  progress, so it is never mistaken for a hung service and killed mid-write.
-
-  Builds for Windows x64 and Arm64 are published with each release.
-
-- **Configuration can come from a file.** The agent has only ever read its
-  settings from environment variables, which suits a container and little
-  else. It now also reads a `KEY=VALUE` file — the same lines as
-  `.env.example` — named by `--config`, by `AGENT_ENV_FILE`, or found as
-  `agent.env` in the data directory. Anything already set in the environment
-  takes precedence over the file, so nothing a compose file or a shell sets
-  can be overridden behind its back.
-
-- **The log can go to a file.** `LOG_FILE` names a file the agent writes its
-  log to as well as the console, rotated at 10 MB with five generations kept,
-  so it can neither vanish nor fill the disk. On Windows it defaults to
-  `logs\agent.log` in the data directory — a service has no console — and the
-  service writes only there.
-
-- **A data directory.** `AGENT_DATA_DIR` (or `--data-dir`) names one place for
-  everything the agent keeps: the cache, the unsent-telemetry spill files, the
-  log and the configuration file all default to paths under it. On Windows it
-  defaults to `%ProgramData%\Overwatch Agent`. In the container nothing
-  changes: no data directory is assumed there, and every default is exactly
-  what it was.
+- **The agent runs on Windows, as a Windows service.** Before, it ran only as a container image, which needed a Linux box or Docker at every venue. It now installs as a service on a Windows PC on the venue network. It starts with the machine with nobody logged in, restarts if it fails, and keeps its own log. The settings, the behaviour and the rules that keep it away from the game server during play are the same as in the container.
+- **Install it with `overwatch-agent.exe install`.** The service runs as the low-privilege *Local Service* account, not as an administrator. The install creates the data folder `C:\ProgramData\Overwatch Agent` and writes a configuration template there. It locks the folder down to administrators, the system and the service, because it holds the site token and, with the cache on, the venue's game data. It refuses to lock down a folder that is not the agent's own, such as a drive root or a shared folder given by mistake.
+- `start`, `stop`, `restart`, `status` and `uninstall` do what they say. A **Reboot agent** command from Overwatch stops the agent cleanly and Windows starts it again. Starts, stops and failed starts are recorded in the Windows Application event log. The Windows guide (WINDOWS.md) covers the steps.
+- **Settings the agent cannot use show as a failed start**, with the reason in the event log, instead of a service that says it started and then stops a second later. When the service stops, the agent is given time to finish and save unsent telemetry, so Windows does not kill it as hung.
+- Builds for Windows x64 and Arm64 are published with each release.
+- **Settings can come from a file.** As well as environment variables, the agent reads a `KEY=VALUE` file, with the same lines as `.env.example`. Name it with `--config` or `AGENT_ENV_FILE`, or put it in the data folder as `agent.env`. A setting in the environment takes priority over the file.
+- **The log can go to a file.** `LOG_FILE` names a file the agent logs to as well as the console. It rotates at 10 MB and keeps five old files, so it cannot fill the disk. On Windows it defaults to `logs\agent.log` in the data folder, and the service logs only there.
+- **One data folder.** `AGENT_DATA_DIR` (or `--data-dir`) sets one place for everything the agent keeps: the cache, unsent telemetry, the log and the configuration file. On Windows it defaults to `%ProgramData%\Overwatch Agent`. Nothing changes in the container.
 
 ### Fixed
 
-- **`healthcheck` built the wrong address when `HEALTH_ADDR` named a host.** It
-  put `127.0.0.1` in front of whatever the setting held, which was right for
-  the default `:8088` and wrong for anything else — `127.0.0.1:8088` became
-  `127.0.0.1127.0.0.1:8088`. It now probes the host given, or the loopback
-  address when the setting binds every interface.
+- **The `healthcheck` command now works when `HEALTH_ADDR` includes a host.** It used to build a broken address, such as `127.0.0.1127.0.0.1:8088`. The default `:8088` was not affected.
 
 ## [1.1.5] — 2026-09-01
 
 ### Fixed
 
-- **Losing contact with the venue's game server left the agent acting on a stale
-  all-clear.** The agent reads the game server's state only on its polling
-  connection. When that connection drops — a restart at the venue, a network
-  fault, anything the agent then retries for as long as the outage lasts — the
-  last reading simply stands. If it read "idle", it stays "idle" for the whole
-  outage, however long that is and whatever happens at the venue meanwhile.
-
-  Two paths reach the game server without going through the poll loop: an
-  operator pressing Resync on the site control panel, and the handler that runs
-  when a game finishes. Either could therefore start reading game data during
-  live play, on the strength of a reading taken before the connection dropped —
-  and the cache refresh is the heaviest read there is, the full game list plus
-  every game the agent does not already hold.
-
-  The safety check now requires a reading that is *current*, not merely
-  favourable. A reading older than two minutes — comfortably longer than the
-  gap between polls, far shorter than any real outage — no longer counts as an
-  all-clear, and an agent that has never polled is never clear. The work is
-  deferred exactly as it is during a game, and picked up once the link is back.
+- **The agent no longer acts on an old "idle" reading after it loses contact with the game server.** When the connection dropped, for example during a restart at the venue or a network fault, the last reading stood for the whole outage. If that reading was "idle", pressing Resync, or the work that runs when a game finishes, could read game data from the game server during live play. Now a reading older than two minutes does not count as idle, and an agent that has never had a reading is never treated as idle. The work waits, as it does during a game, and runs once the connection is back.
 
 ### Changed
 
-- **Deferred results work now reports which of the two reasons applied.** A
-  backfill, resync or re-fetch that is held back says either that a game is
-  active or that contact with the game server has been lost, instead of
-  reporting "game in progress" for both. An operator watching a command sit in
-  "deferred" throughout an outage was being told the one thing that was not
-  happening.
+- **Held-back work now says why.** When a backfill, resync or re-fetch is deferred, it says either that a game is in progress or that the agent has lost contact with the game server. Before, it always said "game in progress", even during an outage.
 
 ## [1.1.4] — 2026-08-31
 
 ### Security
 
-- **The legacy mode printed its database password at startup.** Running against
-  a P&C Micro game database, the agent logged its connection string verbatim on
-  the first line — user, host, database *and password* — so the credential sat
-  in `docker logs` and in anything that collects them. The account is read-only,
-  but the database it opens holds member records, and a password nobody meant
-  to publish is still a password. The line now shows only the user, host and
-  database.
-- **The venue LAN could exhaust the agent's memory.** Both listeners the agent
-  opens on the venue network are unauthenticated by design — the scoring
-  software speaks plain TCP and cannot be changed — so anything on that network
-  can connect to them. Three bounds now apply, because the agent has 128 MB and
-  being killed for running out of it skips the graceful shutdown that saves
-  unsent telemetry:
-  - Concurrent connections to the game-data listener are capped (64, far past
-    any real use). Past that, connections are refused rather than accepted and
-    held; a refused client reconnects, whereas an exhausted agent goes down.
-  - A request is now capped at 64 KiB. A message declares its own length before
-    sending it, and the listener reserved that much up front — a client could
-    declare the 10 MiB protocol maximum, send nothing, and repeat until the
-    agent died. Requests are a few dozen bytes; the large limit exists for the
-    replies.
-  - A request that stops part-way through now times out. Waiting for a client
-    to *start* a request is still unlimited, because scoring software holds its
-    connection open and idle between games.
-- **A single oversized message from the game server could end the agent.** The
-  websocket connection had no message-size limit, so one huge frame — from a
-  compromised or impersonated game server — was read into memory whole. Capped
-  at 10 MiB, matching the limit already applied elsewhere.
-- **The unsent-telemetry queue is now bounded by size as well as count.** A
-  limit of 2000 entries is not a memory limit, because it says nothing about how
-  large an entry is, and the pack-emitter listener accepts entries from anywhere
-  on the venue LAN. At the maximum accepted size that was 128 MB of queue inside
-  a 128 MB container. The queue now also stops at 32 MB, dropping oldest first
-  exactly as it already did when full.
+- **In legacy (Nexus) mode, the agent no longer writes its database password to the log.** The first log line showed the full connection string, password included, so it appeared in `docker logs` and anywhere logs are collected. The account is read-only, but the database holds member records. The line now shows only the user, host and database.
+- **Devices on the venue network can no longer make the agent run out of memory.** Anything on the venue network can connect to the agent without a password, because the scoring software cannot use one. Running out of memory would have restarted the agent without saving unsent telemetry. There are now three limits:
+  - At most 64 connections at once to the port scoring software connects to. More are refused, and the client reconnects.
+  - At most 64 KiB per request.
+  - A time limit on a request that stops part-way. A connection left idle between games is still allowed.
+- **One huge message from the game server can no longer bring the agent down.** Messages are now limited to 10 MiB.
+- **The queue of unsent telemetry now has a size limit as well as a count limit.** It stops at 32 MB as well as 2,000 entries, dropping the oldest first as before. Before, readings sent from the venue network could grow the queue to 128 MB, the agent's whole memory limit.
 
 ## [1.1.3] — 2026-08-30
 
 ### Fixed
 
-- **A completed game's results could be filed against the wrong game number.**
-  The results interface answers a request with a bare reply that says nothing
-  about what was asked for, so a reply is only ever "the next message on this
-  connection". That makes a read failure a property of the connection rather
-  than of the game it happened on: a request that times out part-way leaves
-  unread bytes behind, and a slow answer arrives after the agent has given up
-  waiting for it. Either way the conversation is one message out of step, and
-  the next game's request reads the previous game's answer. The agent then sent
-  that data to Overwatch under the number it had asked for — one game's scores
-  recorded against another game — and marked the game done, so nothing ever
-  corrected it. Backfills and resyncs over a slow game server are exactly where
-  this happens, because they fetch many games in a row over one connection.
-  Any read failure now ends that connection and the next game starts a fresh
-  one, and every answer is checked against the game it says it belongs to
-  before it is stored or sent.
-- **A game the venue's game server no longer holds was cached as though it
-  were the game.** Asked for a game it has since discarded, the server replies
-  with a short refusal; the agent stored that refusal as the game's data. The
-  game then counted as cached — so it was offered to scoring software, which
-  received the refusal in place of the results, and the agent never tried to
-  fetch the real thing again. Such a reply is now recognised and the game is
-  left uncached, to be retried later.
-- **The local cache offered scoring software games it could not actually
-  serve.** Games are recorded as soon as they are seen in the game server's
-  list, which happens well before their data is fetched (and never at all while
-  a game is being played). Those games were included in the list handed to
-  scoring software, which then asked for one and was told the game could not be
-  found. Scoring software takes that in its stride — it leaves the game blank
-  and asks again later — so the entry sat in its list never filling in, polled
-  indefinitely, in exactly the situation the cache exists to cover. Only games
-  whose data is actually held are listed now.
-- **One batch Overwatch refuses could hold back hours of telemetry.** Unsent
-  batches are delivered oldest first, so a batch Overwatch rejects outright —
-  because of its content rather than any outage — sat at the front of the queue
-  being retried forever, with every newer batch stuck behind it until the queue
-  finally overflowed. A rejection that identifies the batch itself as the
-  problem now drops that batch, with a log line, and delivery continues. A
-  refusal that can be put right — an expired token, a misconfigured address, or
-  Overwatch being down or busy — still keeps everything queued, because that
-  data has to survive until the fix is made. The same applies to buffered pack
-  emitter readings.
-- **A cached game could survive a power cut half-written.** A game's data was
-  written and then immediately recorded as available, but nothing forced it to
-  the disk. A venue box losing power in that window came back with a truncated
-  file advertised as complete — served to scoring software as-is and never
-  fetched again. Game data is now flushed to disk before it is marked
-  available. (Records of which games exist are still written the cheap way;
-  they cost nothing to rebuild.)
-- **Scoring software that stopped reading could hold a connection open
-  indefinitely.** If a client stopped collecting its replies — crashed
-  mid-game, or a connection the network had already dropped without saying so —
-  the agent's reply could block forever, keeping the connection and its
-  resources tied up. Replies now have a time limit. Waiting for a client to
-  *ask* something is deliberately still unlimited: scoring software holds its
-  connection open and idle between games.
+- **A finished game's results could be recorded against the wrong game number.** This happened mostly during backfills and resyncs over a slow game server, which fetch many games in a row. One game's scores were sent to Overwatch under another game's number and never corrected. The agent now starts a fresh connection after any read failure, and checks that every answer belongs to the game it asked for before storing or sending it.
+- **A game the game server no longer holds is no longer cached.** The server's short refusal was stored as the game's data, so scoring software received the refusal instead of results, and the agent never tried again. Now the game is left uncached and retried later.
+- **The game cache no longer offers scoring software games it cannot serve yet.** Games were listed before their data had been fetched, so scoring software showed them blank and kept asking for them. Only games whose data the agent holds are listed now.
+- **One batch Overwatch rejects no longer holds up hours of telemetry.** Unsent batches are sent oldest first, so a batch Overwatch rejected because of its content was retried forever, with everything newer stuck behind it. That batch is now dropped, with a log line, and delivery carries on. Problems that can be fixed, such as an expired token, a wrong address, or Overwatch being down or busy, still keep everything queued until the fix is made. Buffered pack emitter readings work the same way.
+- **A power cut can no longer leave a half-written game in the cache.** Before, a venue box that lost power at the wrong moment could come back with a cut-off game marked complete, which was served to scoring software and never fetched again. Game data is now saved to disk before it is marked available.
+- **Scoring software that stops reading can no longer hold a connection open forever.** Replies now have a time limit. Scoring software can still keep an idle connection open between games.
 
 ### Changed
 
-- **A batch that fetches many games now stops after repeated connection
-  failures** instead of working through the whole list. Each failure now also
-  costs a reconnection, and a game server failing that consistently will not
-  serve the rest of the list either — while the batch holds exclusive access to
-  the results interface throughout. A single game the server refuses does not
-  count towards this: that is one bad game, not a bad server.
+- **A fetch of many games now stops after repeated connection failures** instead of working through the whole list. A single game the server refuses does not count towards this.
 
 ## [1.1.2] — 2026-08-30
 
 ### Fixed
 
-- **A backlog of finished games could be read from the venue's game server
-  during a live game.** The results drain ran on the poll loop — the only place
-  the agent records the game server's current state. While the drain worked
-  through a queue of finished games that state could not be refreshed, so the
-  safety check each fetch performs was reading a frozen signal: if a game
-  started part-way through the drain, the games still queued behind it were
-  fetched anyway, during active play. Back-to-back games with a slow game
-  server is exactly the situation that builds such a backlog. The drain now
-  runs off the poll loop, so the state keeps updating and every queued fetch
-  re-checks a live signal. As a bonus, a slow drain no longer stalls telemetry
-  (which could push a venue past Overwatch's offline threshold and flap the
-  site offline just after a game finished).
-- **A backfill or resync could connect to the game server during a live game.**
-  Those commands are checked for safety when they are picked up, but they then
-  wait for exclusive access to the results interface — a wait that can last
-  tens of seconds behind a cache refresh. A game starting during that wait went
-  unnoticed: the command connected, completed the handshake and requested the
-  game list before its first per-game safety check. It now re-checks immediately
-  before connecting and defers instead, matching the single-game fetch path.
+- **A backlog of finished games could be read from the game server during a live game.** If a game started while the agent was working through a queue of finished games, the rest of the queue was still fetched during play. This is most likely with back-to-back games and a slow game server. The agent now keeps reading the game server's state while it works through the queue, so each fetch checks whether a game has started.
+- **A slow backlog no longer holds up telemetry.** Before, it could push a venue past Overwatch's offline threshold, so the site could show as offline just after a game finished.
+- **A backfill or resync could connect to the game server during a live game.** If a game started while the command was waiting its turn, which can take tens of seconds, it went ahead anyway. It now checks again just before connecting and waits if a game has started.
 
 ## [1.1.1] — 2026-08-15
 
 ### Fixed
 
-- **The standalone deployment kept no persistent storage**, so every restart
-  was a cold start. `docker-compose.yml` declared no volume at all while the
-  container filesystem is read-only, which meant the game cache and the
-  unsent-telemetry spill had nowhere to live. Two consequences at venues: any
-  telemetry buffered during an outage was silently discarded on the next
-  restart or upgrade, and the agent re-downloaded its **entire** game cache
-  from Overwatch on every redeploy — hundreds of requests that exhaust the
-  per-site rate limit and stall live telemetry for as long as it takes to
-  finish. The compose file now mounts a persistent volume and pins the cache
-  and buffer paths to it, matching the deployment the fleet has been using.
-- The reported version is correct again. Bumping it in the source was not
-  enough: every image build stamps the version over the top, and the build
-  paths still carried the previous release, so agents kept reporting 1.0.2
-  after the 1.1.0 release. All build paths now agree, and CI fails if they
-  ever drift from the source again.
+- **The standalone `docker-compose.yml` now keeps the agent's data between restarts.** It had no storage volume, so every restart started from scratch. Telemetry held during an outage was lost on the next restart or upgrade. On every redeploy the agent downloaded its whole game cache from Overwatch again: hundreds of requests that hit the site's rate limit and held up live telemetry until they finished. The compose file now keeps the game cache and unsent telemetry on a persistent volume.
+- **The agent reports the right version again.** After the 1.1.0 release, agents still reported 1.0.2.
+
+### Notes
+
+- If a venue's agent was set up from the standalone compose file, use the updated file to get this fix.
 
 ## [1.1.0] — 2026-07-14
 
 ### Added
 
-- **Pack IR bench listener + forwarder.** A new LAN-only, unauthenticated
-  endpoint `POST /local/pack-ir` accepts IR emitter-strength readings from an
-  on-prem calibration node and forwards them to central, buffering across
-  outages (with disk spill across restarts) exactly like telemetry. Malformed
-  readings are rejected at the edge so a bad reading can't poison the forward
-  queue; pack identity is carried explicitly in the payload. Enabled with
-  `PACK_IR_ADDR`; runs in both agent modes as an independent local telemetry
-  source, separate from the print-server path, and its status appears in the
-  admin overview.
+- **The agent can forward pack IR readings from a calibration bench.** A device on the venue network can send pack IR emitter-strength readings to the agent, which passes them on to Overwatch. Turn it on with `PACK_IR_ADDR`. It is for the venue network only and has no password. Readings are held during an outage and kept across restarts, the same as telemetry, and bad readings are rejected when they arrive. It works in both agent modes, and its status shows in the agent's status overview.
 
 ## [1.0.2] — 2026-07-12
 
-### Fixed
-
-- Defensively bound an outgoing print-server frame's payload to `MaxPayload`, so
-  the length always fits the 32-bit header field (parity with central).
+Behind-the-scenes improvements. Nothing changes for you.
 
 ## [1.0.1] — 2026-07-12
 
 ### Fixed
 
-- Restore the central-dispatched cache commands (status refresh, cache resync,
-  cache purge) that had been dropped in an earlier refactor, so operating an
-  agent from Overwatch works again.
-- The agent no longer reports its version as `dev`. Every build path now stamps
-  the real release version — the standalone and monorepo Docker builds default
-  to it, both publish workflows stamp a clean SemVer, and an `AGENT_VERSION`
-  environment variable overrides the reported version on an already-built image
-  without a rebuild.
+- **The status refresh, cache resync and cache purge commands sent from Overwatch work again.** They had stopped working, so you could not operate an agent from Overwatch.
+- **The agent reports its real version instead of `dev`.** You can also set `AGENT_VERSION` to change the version an already-built image reports.
 
 ## [1.0.0] — 2026-07-11
 
@@ -1052,20 +380,10 @@ Initial release.
 
 ### Added
 
-- Live telemetry streaming to central, with offline buffering and replay so a
-  connectivity outage never loses data or disrupts the venue.
-- Idle-gated collection of completed games — the agent reads finished games only
-  when the game server is idle, governed by a dual-signal safety gate, so it
-  never queries the game server during a live game.
-- A local game cache that serves completed game data to scoring software
-  instantly, so scoring reads from the agent instead of the live game server.
-- Central failover backup of every cached game, and automatic restore on a cold
-  start.
-- **Collect from Overwatch** — on-demand, timeframe-scoped pull of games from
-  central into the local cache (skips games already cached; safe during a live
-  game).
-- A token-protected admin API and a browser **control panel** (status, cached
-  games, cache resync, cache purge, collect), with links to this changelog and
-  the public API reference.
-- Multi-architecture container image — `linux/amd64`, `linux/arm64`,
-  `linux/arm/v7` — so it runs on standard PCs and ARM boards from one image tag.
+- **Live telemetry to Overwatch.** If the internet connection drops, the agent holds the data and sends it when the connection is back, so nothing is lost and the venue carries on as normal.
+- **Finished games are collected only when the game server is idle**, never during a live game.
+- **A local game cache.** Scoring software gets finished games from the agent straight away, instead of from the live game server.
+- **Every cached game is backed up to Overwatch**, and restored automatically when the agent starts with an empty cache.
+- **Collect from Overwatch** pulls games for a chosen time range from Overwatch into the local cache. It skips games already cached and is safe during a live game.
+- **A control panel in the browser**, protected by a token. It shows the agent's status and cached games, has buttons to resync or purge the cache and to collect games from Overwatch, and links to this changelog and the public API reference.
+- **One container image for standard PCs and ARM boards** (`linux/amd64`, `linux/arm64` and `linux/arm/v7`).
