@@ -91,6 +91,7 @@ never on it.
 | `ENABLE_LIB_LISTENER` | | `true` | With a fixed `OZONE_WS_HOST`: listen for the announcement and report what is heard, without ever changing the host. `false` opens no socket. Auto mode always listens |
 | `PRINT_SERVER_ABSENT_AFTER` | | `3` | Failed connections to the print server in a row, spread over at least 10 minutes, after which it is treated as absent: results and cache refresh pause, and it is checked again only between games (see [A game server without a print server](#a-game-server-without-a-print-server)). `0` turns this off |
 | `PRINT_SERVER_RECHECK_MAX` | | `900` | Longest wait, in seconds, between checks of a print server treated as absent (kept between `60` and `3600`) |
+| `PRINT_SERVER_KEEP_OPEN` | | `true` | Keep one connection to the print server open, between games and through them, instead of connecting for each piece of work (see [The print-server connection](#the-print-server-connection)). `false` connects and disconnects as before 1.11.0 |
 | `NEXUS_DSN` | legacy | — | Nexus database, `user:password@tcp(host:3306)/ng_system`. Read-only account |
 | `LASERTAG_URL` | legacy | — | On-box management app, at the folder it lives in — no trailing slash |
 | `GAME_SYNC_INTERVAL` | | `30` | Seconds between collections of finished Nexus games (legacy mode) |
@@ -223,12 +224,40 @@ Only the last one costs anything: such a poll cannot confirm the server state,
 so the print server stays off-limits until a clean poll. When it grows the log
 says so in a warning, at most every five minutes.
 
+### The print-server connection
+
+Since 1.11.0 the agent keeps one connection to the print server open, instead
+of connecting and disconnecting for every finished game, every cache refresh
+and every check. It connects between games only, the first time something needs
+the print server, and stays connected through games, but sends nothing at all
+during a game: every request, and every "received" reply, waits until the game
+server is between games. If the connection drops, the agent connects again on
+its own between games (only once the print server has answered since it
+started), waiting a little longer each time one drops soon after it opened (5
+seconds, doubling to 5 minutes); a finished game or a command that needs the
+print server still connects when it needs to.
+
+The game server sends each game's results down that connection as the game
+ends. When a whole game arrives (with its players and events), the agent takes
+it straight away (cache, and Overwatch when `ENABLE_GAME_RESULTS` is on), so it
+no longer has to ask for that game. If only part of a game arrives, the agent
+takes it as word that the game has ended and asks for the whole game between
+games, after `GAME_FINISH_DELAY`; so does a game whose results do not arrive
+that way at all, as before. Print requests and the auto-print setting the game server sends are
+for a printer: the agent prints nothing, notes them once per connection in the
+log, and leaves them.
+
+`PRINT_SERVER_KEEP_OPEN=false` goes back to a connection for each piece of
+work. The connection is in every self-report's `agent.print_server`
+(`connection`, `connected_since`, `connections`, `games_sent_unasked`,
+`parts_sent_unasked`, `messages_left`).
+
 ### A game server without a print server
 
 Some O-Zone servers have no print server (nothing answers on `12123`). At such
 a venue leave `ENABLE_GAME_RESULTS`, `ENABLE_CACHE` and `ENABLE_MSG_BUS` off.
-If they are on, the agent notices: after `PRINT_SERVER_ABSENT_AFTER` failed
-connections in a row (3), spread over at least 10 minutes, it logs once that it
+If they are on, the agent notices (it tries to connect between games): after
+`PRINT_SERVER_ABSENT_AFTER` failed connections in a row (3), spread over at least 10 minutes, it logs once that it
 is treating the print server as absent, stops fetching results and refreshing
 the cache, and checks again only between games: after a minute, then twice as
 long after each failed check, up to `PRINT_SERVER_RECHECK_MAX` (15 minutes).

@@ -458,6 +458,10 @@ func presenceApp(t *testing.T, mutate func(*config.Config)) (*App, *ozonesim.Pri
 		mutate(&cfg)
 	}
 	a := New(cfg)
+	// Before the print server closes (cleanups run last first), so a held
+	// connection ends as the agent's choice and logs nothing into a later
+	// test's captured log.
+	t.Cleanup(func() { a.psLink().close() })
 	a.ps.mu.Lock()
 	a.ps.minSpan = 0
 	a.ps.mu.Unlock()
@@ -480,8 +484,7 @@ func withCache(t *testing.T) func(*config.Config) {
 func dialOnce(a *App, manual bool) error {
 	s := a.newResultsSession(manual)
 	defer s.retire()
-	_, err := s.connect()
-	return err
+	return s.connect()
 }
 
 // makeAbsent fails three dials. seenFirst makes one succeed before them.

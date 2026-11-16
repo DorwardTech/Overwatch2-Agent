@@ -18,8 +18,9 @@ import (
 // dialling it, and checks again now and then, always between games.
 //
 // It is fed from the one place the agent dials the print server
-// (resultsSession.connect), after the print-server gate has passed, so a check
-// can never happen during a game.
+// (printLink.ensure, reached through resultsSession.connect and, once the
+// print server has answered in this run, printLink.maintain), after the
+// print-server gate has passed, so a check can never happen during a game.
 
 // printServerRecheckBase is the first wait before a print server treated as
 // absent is checked again. Each check that fails doubles the wait, up to
@@ -244,6 +245,14 @@ func (p *printServerPresence) queueing() (absent, everReached bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.state == psAbsent, p.everReached
+}
+
+// answeredThisRun reports whether the print server has answered since the
+// agent started.
+func (p *printServerPresence) answeredThisRun() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.everReached
 }
 
 // addDropped counts queued games dropped while the print server was absent.

@@ -90,6 +90,22 @@ func (c *Client) GameListRaw(timeout time.Duration) ([]byte, error) {
 	return c.readFrame(timeout)
 }
 
+// Send writes one command frame within the timeout. With Next it lets one
+// reader take every frame the game server sends, replies and pushes alike,
+// while requests are written beside it (see the agent's printLink).
+func (c *Client) Send(cmd map[string]any, timeout time.Duration) error {
+	return c.send(cmd, timeout)
+}
+
+// Next waits for the next frame, however long that takes, and returns its
+// body. It is for a connection held open: the game server sends a finished
+// game unasked, so silence is normal and only a read error ends the wait.
+// Closing the client unblocks it.
+func (c *Client) Next() ([]byte, error) {
+	_ = c.conn.SetReadDeadline(time.Time{})
+	return ozoneproto.ReadFrame(c.conn)
+}
+
 // Acknowledge tells O-Zone the data was received.
 func (c *Client) Acknowledge(timeout time.Duration) error {
 	return c.send(map[string]any{"success": true}, timeout)

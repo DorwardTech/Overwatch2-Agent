@@ -26,6 +26,8 @@ type PrintServer struct {
 	games     map[int][]byte       // gamenumber -> full "all" payload (verbatim)
 	banner    [][]byte             // frames pushed on connect (default: event_types, texts)
 	conns     int                  // total connections accepted
+	open      map[net.Conn]bool    // connections still open
+	wmu       sync.Mutex           // one write at a time on any connection
 	requests  map[string]int       // command -> count
 	onRequest func(command string) // test hook, invoked per command (may be nil)
 	closed    bool
@@ -52,7 +54,66 @@ func NewPrintServer() *PrintServer {
 			ozonefix.Compact(ozonefix.TextsBannerJSON()),
 		},
 		requests: map[string]int{},
+		open:     map[net.Conn]bool{},
 	}
+}
+
+// OpenConnections returns how many connections are open now.
+func (p *PrintServer) OpenConnections() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.open)
+}
+
+// PushGame sends a game's "all" payload, unasked, to every open connection,
+// as real O-Zone does when a game ends. It reports how many it was sent to.
+func (p *PrintServer) PushGame(gameNumber int) int {
+	p.mu.Lock()
+	raw, ok := p.games[gameNumber]
+	p.mu.Unlock()
+	if !ok {
+		return 0
+	}
+	return p.SendToAll(raw)
+}
+
+// SendToAll sends one frame, unasked, to every open connection (a print
+// command, the auto-print setting, a game's data). It reports how many it
+// was sent to.
+func (p *PrintServer) SendToAll(body []byte) int {
+	p.mu.Lock()
+	conns := make([]net.Conn, 0, len(p.open))
+	for c := range p.open {
+		conns = append(conns, c)
+	}
+	p.mu.Unlock()
+	sent := 0
+	for _, c := range conns {
+		if p.write(c, body) == nil {
+			sent++
+		}
+	}
+	return sent
+}
+
+// DropConnections closes every open connection from the server's side.
+func (p *PrintServer) DropConnections() {
+	p.mu.Lock()
+	conns := make([]net.Conn, 0, len(p.open))
+	for c := range p.open {
+		conns = append(conns, c)
+	}
+	p.mu.Unlock()
+	for _, c := range conns {
+		_ = c.Close()
+	}
+}
+
+func (p *PrintServer) write(c net.Conn, body []byte) error {
+	p.wmu.Lock()
+	defer p.wmu.Unlock()
+	_, err := c.Write(ozoneproto.Frame(body))
+	return err
 }
 
 // SetList overrides the verbatim response to {"command":"list"}.
@@ -106,13 +167,15 @@ func (p *PrintServer) Requests(command string) int {
 	return p.requests[command]
 }
 
-// Close stops the listener.
+// Close stops the listener and closes the connections still open.
 func (p *PrintServer) Close() error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	p.closed = true
-	if p.ln != nil {
-		return p.ln.Close()
+	ln := p.ln
+	p.mu.Unlock()
+	p.DropConnections()
+	if ln != nil {
+		return ln.Close()
 	}
 	return nil
 }
@@ -125,20 +188,26 @@ func (p *PrintServer) acceptLoop(ln net.Listener) {
 		}
 		p.mu.Lock()
 		p.conns++
+		p.open[conn] = true
 		p.mu.Unlock()
 		go p.handle(conn)
 	}
 }
 
 func (p *PrintServer) handle(conn net.Conn) {
-	defer conn.Close()
+	defer func() {
+		p.mu.Lock()
+		delete(p.open, conn)
+		p.mu.Unlock()
+		_ = conn.Close()
+	}()
 
 	// Push the connect banner first (2 frames), like real O-Zone.
 	p.mu.Lock()
 	banner := p.banner
 	p.mu.Unlock()
 	for _, frame := range banner {
-		if _, err := conn.Write(ozoneproto.Frame(frame)); err != nil {
+		if err := p.write(conn, frame); err != nil {
 			return
 		}
 	}
@@ -156,7 +225,7 @@ func (p *PrintServer) handle(conn net.Conn) {
 		if silent {
 			continue
 		}
-		if _, err := conn.Write(ozoneproto.Frame(resp)); err != nil {
+		if err := p.write(conn, resp); err != nil {
 			return
 		}
 	}

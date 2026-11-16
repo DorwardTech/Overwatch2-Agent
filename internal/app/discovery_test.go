@@ -243,7 +243,7 @@ func TestNothingReachesThePrintServerBeforeAChoice(t *testing.T) {
 	}
 	a.noteServerMode(1)
 	a.gameState.Store(stateIdle)
-	if _, err := a.newResultsSession(false).connect(); !errors.Is(err, errLinkStale) {
+	if err := a.newResultsSession(false).connect(); !errors.Is(err, errLinkStale) {
 		t.Fatalf("connect() = %v with no address, want errLinkStale", err)
 	}
 	a.queueFetch(9)
