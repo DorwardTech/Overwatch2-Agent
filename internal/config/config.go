@@ -70,6 +70,11 @@ type Config struct {
 	// detection off. The ENABLE_* flags still decide whether anything dials.
 	PrintServerAbsentAfter int
 	PrintServerRecheckMax  time.Duration
+	// PrintServerKeepOpen holds one print-server connection open, between
+	// games and through them, instead of a connection for each piece of work
+	// (PRINT_SERVER_KEEP_OPEN, default true; agent 1.11.0). Nothing is sent
+	// to it during a game either way.
+	PrintServerKeepOpen bool
 
 	// Transparent print-server proxy (what TORN connects to instead of O-Zone)
 	// and the token-protected admin/control HTTP API.
@@ -174,6 +179,7 @@ func Load() (Config, error) {
 
 		PrintServerAbsentAfter: envInt("PRINT_SERVER_ABSENT_AFTER", 3),
 		PrintServerRecheckMax:  time.Duration(envInt("PRINT_SERVER_RECHECK_MAX", 900)) * time.Second,
+		PrintServerKeepOpen:    envBool("PRINT_SERVER_KEEP_OPEN", true),
 
 		ProxyEnabled:    envBool("ENABLE_PROXY", false),
 		ProxyListenAddr: env("PROXY_LISTEN_ADDR", "0.0.0.0:12123"),

@@ -6,6 +6,27 @@ first.
 
 The Site Agent and Overwatch have their own version numbers.
 
+## [1.11.0] — 2026-11-16
+
+The agent now keeps one connection to the print server open, instead of connecting and disconnecting for every game. One new setting, optional: the default suits every venue. Docker venues pull the 1.11.0 image; Windows venues run the 1.11.0 installer.
+
+### Changed
+
+- **One connection to the print server, kept open.** The agent used to connect to the print server and disconnect again for every finished game, every refresh of its local copy of games (every minute with that copy on), every command and every check, so the game server showed it connecting and disconnecting over and over. Now it connects once, between games, the first time it needs the print server, and stays connected.
+- **Nothing is sent to the print server during a game.** The connection stays open through a game, but the agent asks for nothing and replies to nothing until the game is over, as before.
+- **Results arrive as each game ends.** The game server sends each game's results down that connection when the game finishes. When a whole game arrives, the agent takes it straight away and sends it to Overwatch, so it no longer has to ask for it. If only part of a game arrives, or nothing does, the agent asks for the whole game between games, as before.
+- **If the connection drops,** the agent connects again on its own between games. If it keeps dropping soon after it opens, the agent waits longer each time, from 5 seconds up to 5 minutes. A finished game, or anything else that needs the print server, still connects when it needs to, between games. Each connection and each drop is noted in the agent's log.
+- **Print requests are left alone.** The game server can send print requests and its auto-print setting down the same connection. The agent prints nothing, so it notes them once in its log and leaves them.
+
+### Added
+
+- **A new setting,** `PRINT_SERVER_KEEP_OPEN`. Default `true`. Set it to `false` to go back to a connection for each piece of work, as in earlier releases.
+- **The agent reports the connection.** Its status report to Overwatch now says whether the connection is open, since when, how many connections have been opened since the agent started (this should stay low), how many games' results arrived whole as the game ended, how many arrived only in part, and how many print requests and other messages were left alone.
+
+### Notes
+
+- Nothing changes for a venue whose game server has no print server: the agent only connects on its own once the print server has answered since the agent started. Nothing changes either for a venue with game results, the local copy and the message bus all off.
+
 ## [1.10.1] — 2026-11-11
 
 A security update. Docker venues pull the 1.10.1 image; Windows venues run the 1.10.1 installer.

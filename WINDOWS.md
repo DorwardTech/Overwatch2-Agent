@@ -40,7 +40,7 @@ At a Nexus venue the agent runs on the Nexus server itself (see
    > release before running it:
    >
    > ```powershell
-   > Get-FileHash .\overwatch-agent_1.10.1_windows_setup.exe -Algorithm SHA256
+   > Get-FileHash .\overwatch-agent_1.11.0_windows_setup.exe -Algorithm SHA256
    > ```
 
    The installer copies the agent to `C:\Program Files\Overwatch Agent\` and
@@ -111,7 +111,7 @@ the identical agent:
    check it against `SHA256SUMS.txt` from the same release:
 
    ```powershell
-   Get-FileHash .\overwatch-agent_1.10.1_windows_amd64.zip -Algorithm SHA256
+   Get-FileHash .\overwatch-agent_1.11.0_windows_amd64.zip -Algorithm SHA256
    ```
 
 2. **Extract** it to `C:\Program Files\Overwatch Agent\`. Keep the executable
@@ -136,7 +136,7 @@ The installer itself takes the usual Inno Setup switches, so a scripted rollout
 can run it unattended:
 
 ```powershell
-.\overwatch-agent_1.10.1_windows_setup.exe /VERYSILENT /NORESTART
+.\overwatch-agent_1.11.0_windows_setup.exe /VERYSILENT /NORESTART
 ```
 
 A silent install registers and configures the service but does not open the
@@ -273,7 +273,8 @@ the cache. At a venue whose game server has no print server, leave
 `ENABLE_GAME_RESULTS`, `ENABLE_CACHE` and `ENABLE_MSG_BUS` off. If they are on,
 the agent notices that nothing answers and stops trying except for a check
 between games (`PRINT_SERVER_ABSENT_AFTER`, `PRINT_SERVER_RECHECK_MAX`; see the
-README).
+README). Where there is a print server, the agent keeps one connection to it
+open and sends nothing during a game (`PRINT_SERVER_KEEP_OPEN`; see the README).
 
 ## Firewall
 

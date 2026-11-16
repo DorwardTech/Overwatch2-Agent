@@ -3,13 +3,13 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"math"
-	"net"
 	"sort"
 	"strconv"
 	"strings"
@@ -75,6 +75,9 @@ var errFrameMismatch = errors.New("results: reply is for a different game")
 // the game cached, serve the error blob to TORN in its place, and stop the
 // agent ever fetching the real thing.
 var errNotGameData = errors.New("results: reply is not game data")
+
+// errNotGameList is a reply to "list" that is not a game list (a refusal).
+var errNotGameList = errors.New("results: reply to the game list request is not a game list")
 
 // errIdentityLost ends a poll that found the machine at our address has become
 // a different game server (auto mode; see identityLost). The run is ending to
@@ -251,6 +254,12 @@ type App struct {
 	ps printServerPresence
 	// dialResults dials the print server: results.Dial, replaced in tests.
 	dialResults func(host, port string, timeout time.Duration) (*results.Client, error)
+	// link is the one connection to the print server (see printlink.go and
+	// psLink, which makes it for an App built without New).
+	link     *printLink
+	linkOnce sync.Once
+	// pushedMu handles one game sent unasked at a time (see takePushedGame).
+	pushedMu sync.Mutex
 
 	store  *store.Store   // local verbatim game cache (nil if disabled/unavailable)
 	cache  *cache.Cache   // O-Zone-shaped view over the store
@@ -285,6 +294,7 @@ func New(cfg config.Config) *App {
 		probe:       ozone.Probe,
 		dialResults: results.Dial,
 	}
+	a.psLink()
 	if !cfg.OzoneDiscover {
 		a.setOzoneHost(cfg.OzoneHost)
 	}
@@ -403,7 +413,7 @@ func (a *App) Overview() map[string]any {
 	// Frames discarded from the game server since the agent started.
 	overview["frames"] = a.frames.report()
 	// Whether the print server answers (same block as the self-report's).
-	overview["print_server"] = a.ps.report(time.Now())
+	overview["print_server"] = a.printServerReport()
 	return overview
 }
 
@@ -447,6 +457,9 @@ func (a *App) Run(ctx context.Context) {
 	if a.cfg.BufferFile != "" {
 		defer a.saveBuffer()
 	}
+	// The game server sees the print-server connection close as the agent
+	// stops, not when the connection times out.
+	defer a.psLink().close()
 
 	go a.health.Serve(a.cfg.HealthAddr)
 
@@ -778,10 +791,15 @@ func (a *App) collect(client *ozone.Client, slow bool) ([]byte, string, error) {
 	a.noteServerMode(mode)
 	a.reconcileState(mode)
 	a.stateMu.Unlock()
-	// A finished game's follow-up work that found the print server off-limits
-	// runs now, off this goroutine, if the gate has opened.
-	if a.finishPending.Load() && a.printServerGate() == nil {
-		go a.finishWork()
+	// With the gate open: a finished game's follow-up work that found the
+	// print server off-limits runs now, off this goroutine; and the
+	// print-server connection is opened if it is not, and owed
+	// acknowledgements sent (see printLink.maintain).
+	if a.printServerGate() == nil {
+		if a.finishPending.Load() {
+			go a.finishWork()
+		}
+		go a.psLink().maintain()
 	}
 	if a.cfg.ResultsEnabled {
 		a.checkGameResults(server)
@@ -851,7 +869,7 @@ func (a *App) collect(client *ozone.Client, slow bool) ([]byte, string, error) {
 			"results_pending":  pending,
 			"results_given_up": givenUp,
 			"frames":           a.frames.report(),
-			"print_server":     a.ps.report(time.Now()),
+			"print_server":     a.printServerReport(),
 		}
 		if a.lib != nil {
 			payload["agent"].(map[string]any)["lib"] = a.lib.Report()
@@ -1133,32 +1151,23 @@ func (a *App) onPrintServerBack() {
 	a.finishPending.Store(true)
 }
 
-// resultsSession owns the print-server connection for a run of fetches — one
-// game or a whole backfill — and is the only place the agent dials the results
-// API.
+// resultsSession is a run of print-server work — one game or a whole backfill
+// — over the agent's one print-server connection (see printLink).
 //
-// It exists because the results protocol carries no request/response
-// correlation: a reply says nothing about what was asked for, so the Nth reply
-// is only ever "the Nth frame on this socket". That makes a read error a
-// property of the CONNECTION, not of the game it happened on. A deadline
-// expiring mid-frame leaves unread bytes in the socket; a reply the print
-// server sends after we gave up waiting arrives later, unbidden. Either way the
-// stream is off by one, and the next game's request reads the PREVIOUS game's
-// frame — which central would store under the wrong game number and mark
-// fetched, so nothing would ever correct it.
-//
-// So any read error retires the connection and the next fetch dials a fresh
-// one. Because a fresh dial is a new touch of the print server, it re-checks
-// the idle gate; and because a desync can in principle survive a clean read,
-// every payload is matched against the game number it reports for itself.
+// Since 1.11.0 a session no longer owns a connection: it uses the one the
+// agent holds open, dialling it first if it is not open, and leaves it open
+// when it is done (with PRINT_SERVER_KEEP_OPEN off the last session closes
+// it). Every request passes the print-server gate as it is sent, and every
+// reply is checked against the game it reports for itself.
 //
 // manual marks a session an operator asked for (refetch_game, backfill_all,
 // resync_all, cache_resync, the admin Resync). It still waits for the gate,
 // but dials even a print server treated as absent: one press is one check.
 type resultsSession struct {
 	app    *App
-	conn   *results.Client
 	manual bool
+	using  bool   // holds the connection and a printServerBusy count until retire
+	gen    uint64 // the connection the last reply came on (see acknowledge)
 }
 
 func (a *App) newResultsSession(manual bool) *resultsSession {
@@ -1173,92 +1182,54 @@ func (a *App) dial(host, port string, timeout time.Duration) (*results.Client, e
 	return results.Dial(host, port, timeout)
 }
 
-// connect returns a live connection, dialling one if there isn't a usable one
-// already. Every dial is gated on the print server being idle.
-func (s *resultsSession) connect() (*results.Client, error) {
-	if s.conn != nil {
-		return s.conn, nil
+// connect makes sure the connection is open (see printLink.ensure, which
+// dials only with the gate open).
+func (s *resultsSession) connect() error {
+	if err := s.app.psLink().ensure(s.manual); err != nil {
+		return err
 	}
-	// The address is read once, before the gate: no address yet (auto mode
-	// still choosing) is "not now", like a stale reading.
-	host := s.app.ozoneAddr()
-	if host == "" {
-		return nil, errLinkStale
+	if !s.using {
+		s.using = true
+		s.app.psLink().use()
+		// A run of print-server work in progress; see nextPollInterval.
+		s.app.printServerBusy.Add(1)
 	}
-	if err := s.app.printServerGate(); err != nil {
-		return nil, err
-	}
-	// After the gate, never instead of it: a print server treated as absent
-	// is left alone by automatic work until its next check is due, and the
-	// check itself is a dial like this one, so it too only ever happens
-	// between games.
-	if err := s.app.ps.allow(time.Now(), s.manual); err != nil {
-		return nil, err
-	}
-	port := s.app.cfg.OzoneResultsPort
-	addr := net.JoinHostPort(host, port)
-	rc, err := s.app.dial(host, port, 5*time.Second)
-	if err != nil {
-		// Only a dial that failed with the gate still open counts against
-		// the print server: one that failed while it closed under it (the
-		// link dropped, a game started) says nothing about it. Automatic work
-		// then stands down if the print server is now treated as absent; an
-		// operator is told what the dial found.
-		if gateErr := s.app.printServerGate(); gateErr != nil {
-			// A check of a print server treated as absent, cut short by the
-			// gate, is "not now": the work is put off (the gate error is
-			// deferrable), so no attempt is used up and nothing is logged.
-			// Only while absent, so the other states behave as before.
-			if absent, _ := s.app.ps.queueing(); absent {
-				return nil, fmt.Errorf("%w (%w)", gateErr, err)
-			}
-			return nil, err
-		}
-		if s.app.ps.failed(addr, err, time.Now(), s.manual) && !s.manual {
-			return nil, fmt.Errorf("%w (%v)", errPrintServerAbsent, err)
-		}
-		return nil, err
-	}
-	if s.app.ps.reached(addr, time.Now(), s.app.pendingCount) {
-		s.app.onPrintServerBack()
-	}
-	// O-Zone pushes a fixed handshake (texts + event_types) on connect; consume
-	// it before issuing a command, or the reply would be the handshake instead.
-	rc.Drain(s.app.cfg.ResultsHandshake, 5*time.Second)
-	s.conn = rc
-	// An open results connection is print-server work; see nextPollInterval.
-	s.app.printServerBusy.Add(1)
-	return rc, nil
+	return nil
 }
 
-// retire closes the current connection. The next command dials a clean one.
+// retire ends the session. The connection stays open unless
+// PRINT_SERVER_KEEP_OPEN is off.
 func (s *resultsSession) retire() {
-	if s.conn == nil {
+	if !s.using {
 		return
 	}
-	s.conn.Close()
-	s.conn = nil
+	s.using = false
 	s.app.printServerBusy.Add(-1)
+	s.app.psLink().release()
 }
 
-// acknowledge tells O-Zone the data was received (best-effort, only if the
-// connection is still live).
+// acknowledge tells O-Zone the data was received (best-effort, only with the
+// gate open, and only on the connection the last reply came on).
 func (s *resultsSession) acknowledge() {
-	if s.conn != nil {
-		_ = s.conn.Acknowledge(5 * time.Second)
+	if s.using && s.gen != 0 {
+		s.app.psLink().acknowledge(s.gen)
 	}
 }
 
 // list fetches the verbatim game list.
 func (s *resultsSession) list() ([]byte, error) {
-	rc, err := s.connect()
+	if err := s.connect(); err != nil {
+		return nil, err
+	}
+	raw, gen, err := s.app.psLink().request(map[string]any{"command": "list"}, 0)
 	if err != nil {
 		return nil, err
 	}
-	raw, err := rc.GameListRaw(20 * time.Second)
-	if err != nil {
-		s.retire()
-		return nil, err
+	s.gen = gen
+	// A refusal is not an empty list: read as one, a backfill would report
+	// success having synced nothing.
+	if f := classifyFrame(raw); f.kind != frameList {
+		return nil, fmt.Errorf("%w (%s)", errNotGameList, f.kind)
 	}
 	return raw, nil
 }
@@ -1266,24 +1237,20 @@ func (s *resultsSession) list() ([]byte, error) {
 // game fetches one game's verbatim payload and verifies the reply is for the
 // game that was asked for.
 func (s *resultsSession) game(gameNumber int) ([]byte, error) {
-	rc, err := s.connect()
+	if err := s.connect(); err != nil {
+		return nil, err
+	}
+	raw, gen, err := s.app.psLink().request(map[string]any{"gamenumber": gameNumber, "command": "all"}, gameNumber)
 	if err != nil {
 		return nil, err
 	}
-	raw, err := rc.GameDataRaw(gameNumber, 20*time.Second)
-	if err != nil {
-		s.retire()
-		return nil, err
-	}
+	s.gen = gen
+	// The link takes as the reply only the whole game naming the game asked
+	// for, or a refusal (see linkWaiter.wants), so a reply for another game is
+	// not expected here; it is still checked, as every payload cached is. A
+	// refusal was read cleanly — the game server declining the game — and the
+	// connection stays.
 	if err := verifyPayload(raw, gameNumber); err != nil {
-		// A reply for a DIFFERENT game means the stream is off by one, so the
-		// connection cannot be trusted for the next request either. Not being
-		// game data is a different thing entirely: that reply was read cleanly
-		// and in sequence — it is O-Zone declining the game, not a desync — so
-		// the connection stays and the rest of the batch runs over it.
-		if errors.Is(err, errFrameMismatch) {
-			s.retire()
-		}
 		return nil, err
 	}
 	return raw, nil
@@ -1355,6 +1322,91 @@ func (a *App) pullGameResults(gameNumber int, manual bool) error {
 	}
 	s.acknowledge()
 	return nil
+}
+
+// psLink returns the print-server connection, making it on first use.
+func (a *App) psLink() *printLink {
+	a.linkOnce.Do(func() {
+		if a.link == nil {
+			a.link = newPrintLink(a)
+		}
+	})
+	return a.link
+}
+
+// printServerReport is the self-report's (and the overview's) print_server
+// block: whether the print server answers, and the connection to it.
+func (a *App) printServerReport() map[string]any {
+	return a.psLink().report(a.ps.report(time.Now()))
+}
+
+// gameEndedUnasked handles part of a game the game server sent unasked (see
+// printLink): word that game n has ended, never its results. Unless it is
+// already fetched, it waits out GAME_FINISH_DELAY, as a finish the message bus
+// reports does, and is then asked for whole between games: queued when
+// results (or the message bus) are on, and found by the next cache refresh
+// when only the cache is.
+//
+// A game already held or queued keeps the wait it has: the message bus's finish
+// set it, and its finish work runs once when that wait is over, so moving the
+// wait later would make that run skip the game (and part of a game sent again
+// and again would put it off for as long as it kept coming).
+func (a *App) gameEndedUnasked(n int) {
+	if a.isFetched(n) {
+		return
+	}
+	a.holdUnlessWaiting(n, time.Now().Add(a.cfg.GameFinishDelay))
+	if a.syncsResults() {
+		a.queueFetch(n)
+	}
+}
+
+// syncsResults reports whether finished games are sent to central: with game
+// results on, and with the message bus on whatever ENABLE_GAME_RESULTS says
+// (its finish fetches the game; see handleBusEvent).
+func (a *App) syncsResults() bool { return a.cfg.ResultsEnabled || a.bus != nil }
+
+// takePushedGame handles a whole game the game server sent unasked as it
+// ended (see printLink). It is cached and sent to central like a fetched game, so the
+// game is never asked for. Should central not take it, the game is queued to
+// be asked for between games, with the usual back-off.
+func (a *App) takePushedGame(n int, raw []byte) {
+	a.pushedMu.Lock()
+	defer a.pushedMu.Unlock()
+	// Cached unless the cache holds exactly this already (the game asked for
+	// and then sent again unasked): a different payload under the number is
+	// replaced, as a fetch replaces it, so the cache does not keep an older
+	// game's payload under a number the game server has used again. (A number
+	// used again within one run is still not sent to central a second time:
+	// isFetched below, as on every other path.)
+	if a.store != nil {
+		if old, ok, err := a.store.GameRaw(n); err != nil || !ok || !bytes.Equal(old, raw) {
+			a.cacheGame(n, raw)
+		}
+	}
+	if !a.syncsResults() || a.isFetched(n) {
+		return
+	}
+	var data map[string]any
+	if err := json.Unmarshal(raw, &data); err != nil {
+		return
+	}
+	if err := a.pusher.PushGameResults(n, data); err != nil {
+		a.queueFetch(n)
+		if !a.cfg.ResultsEnabled {
+			// Only the message bus syncs results here, and only its finish
+			// work drains the queue: it runs once, after GAME_FINISH_DELAY,
+			// and would skip a game put off by a back-off. Left queued with no
+			// attempt used, that run fetches and sends it, as before.
+			log.Printf("[agent] results: game #%d sent by the game server as it ended, but central did not take it (%v); it will be fetched after the game's finish delay", n, err)
+			return
+		}
+		a.noteFetchFailure(n, err)
+		return
+	}
+	a.markFetched(n)
+	a.clearPending(n)
+	log.Printf("[agent] results: game #%d sent by the game server as it ended; synced to central", n)
 }
 
 // processCommands pulls queued commands from central, runs each, and reports
@@ -1659,6 +1711,24 @@ func (a *App) handleBusEvent(ev msgbus.Event) {
 func (a *App) notBefore(n int, t time.Time) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.notBeforeLocked(n, t)
+}
+
+// holdUnlessWaiting is notBefore for a game not already waiting: one held, or
+// queued to be fetched, keeps the wait it has. Checked and set under one lock,
+// so a finish the message bus reports in between is not moved later (see
+// gameEndedUnasked).
+func (a *App) holdUnlessWaiting(n int, t time.Time) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if _, queued := a.pendingFetch[n]; queued || time.Now().Before(a.finishHold[n]) {
+		return
+	}
+	a.notBeforeLocked(n, t)
+}
+
+// notBeforeLocked is notBefore's body; a.mu must be held.
+func (a *App) notBeforeLocked(n int, t time.Time) {
 	now := time.Now()
 	for k, until := range a.finishHold {
 		if !now.Before(until) {

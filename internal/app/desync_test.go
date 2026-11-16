@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 
 	"overwatch/agent/internal/config"
 	"overwatch/agent/internal/ozonefix"
@@ -118,9 +119,10 @@ func (p *faultyPrintServer) handle(conn net.Conn) {
 	}
 }
 
-// gamePayload is a minimal "all" response identifying itself as a given game.
+// gamePayload is a minimal "all" response identifying itself as a given game:
+// its details, players and events, as every reply to "all" carries.
 func gamePayload(gameNumber int) []byte {
-	return []byte(`{"game":{"gamenum":` + itoa(gameNumber) + `,"gamename":"g"},"players":{}}`)
+	return []byte(`{"game":{"gamenum":` + itoa(gameNumber) + `,"gamename":"g"},"players":{},"events":[]}`)
 }
 
 func itoa(n int) string {
@@ -174,6 +176,8 @@ func newFaultApp(t *testing.T, ps *faultyPrintServer) (*App, *pushedGames) {
 	})
 	a.noteServerMode(1) // idle
 	a.gameState.Store(stateIdle)
+	// A request whose reply never comes gives up quickly here.
+	a.psLink().replyWait = 300 * time.Millisecond
 	return a, pushed
 }
 
@@ -184,8 +188,10 @@ const twoGameList = `{"gamelist":[` +
 // The results protocol has no request/response correlation, so a desynchronised
 // connection answers the NEXT request with the PREVIOUS game's frame. Pushing
 // that would file one game's data under another game's number at central — and
-// markFetched would then stop the agent ever fetching the real thing. The reply
-// must be checked against the game it claims to be.
+// markFetched would then stop the agent ever fetching the real thing. Since
+// 1.11.0 a game frame is only ever the reply for the game it names: game 9's
+// frame is taken as game 9 sent unasked (already synced, so not sent to
+// central again), and game 10's request, never answered, gives up.
 func TestSyncGamesRejectsAReplyForAnotherGame(t *testing.T) {
 	ps := startFaultyPrintServer(t, twoGameList, func(gameNumber, nth int) ([]byte, bool) {
 		if nth == 1 {
