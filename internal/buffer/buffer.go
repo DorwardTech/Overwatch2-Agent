@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 )
 
@@ -65,6 +66,36 @@ func (b *Buffer) Push(key string, data []byte) {
 
 	b.nextID++
 	b.items = append(b.items, Entry{Key: key, Data: data, id: b.nextID})
+	b.bytes += len(data)
+	b.trimLocked()
+}
+
+// PushReplacing drops every queued entry whose key starts with prefix, then
+// pushes key and data at the tail, so the queue holds at most one entry of
+// that kind: the latest. It is for a status that only the newest copy of
+// means anything (agent 1.12.0's heartbeats). Queued one per tick while
+// central was unreachable, they would fill the queue and push out the
+// telemetry ahead of them, then take minutes to replay, all to say what the
+// last one says.
+//
+// Other entries keep their places, and the new one goes behind them, so it is
+// still delivered after everything queued before it and before everything
+// queued after it. Dropping an entry a drain is sending is safe: PopSent then
+// finds a different head and leaves it alone.
+func (b *Buffer) PushReplacing(prefix, key string, data []byte) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	kept := make([]Entry, 0, len(b.items)+1)
+	for _, e := range b.items {
+		if strings.HasPrefix(e.Key, prefix) {
+			b.bytes -= len(e.Data)
+			continue
+		}
+		kept = append(kept, e)
+	}
+	b.nextID++
+	b.items = append(kept, Entry{Key: key, Data: data, id: b.nextID})
 	b.bytes += len(data)
 	b.trimLocked()
 }

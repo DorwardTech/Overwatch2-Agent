@@ -2,6 +2,8 @@ package app
 
 import (
 	"errors"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -170,7 +172,6 @@ func TestNothingIsSentDuringAGameOverTheOpenConnection(t *testing.T) {
 	if err := a.pullGameResults(9, false); err != nil {
 		t.Fatal(err)
 	}
-	waitUntil(t, "game 9's acknowledgement", 2*time.Second, func() bool { return ps.Requests("ack") == 1 })
 	alls, acks := ps.Requests("all"), ps.Requests("ack")
 
 	startGame(a)
@@ -475,10 +476,11 @@ func TestPartOfAGameSentUnaskedIsAskedForWhole(t *testing.T) {
 	if r := a.printServerReport(); r["parts_sent_unasked"] != 1 || r["games_sent_unasked"] != 0 {
 		t.Errorf("report = %v, want parts_sent_unasked 1, games_sent_unasked 0", r)
 	}
-	waitUntil(t, "the whole game's acknowledgement", 2*time.Second, func() bool { return ps.Requests("ack") == 1 })
+	// Nothing is acknowledged: not the part, and not the whole game, which
+	// was asked for.
 	time.Sleep(50 * time.Millisecond)
-	if got := ps.Requests("ack"); got != 1 {
-		t.Errorf("acknowledgements = %d, want 1 (the whole game's, not the part's)", got)
+	if got := ps.Requests("ack"); got != 0 {
+		t.Errorf("acknowledgements = %d, want 0", got)
 	}
 }
 
@@ -803,4 +805,153 @@ func TestABusOnlyVenueLeavesARefusedGameForTheFinishRun(t *testing.T) {
 	if attempts != 0 || !retry.IsZero() {
 		t.Fatalf("attempts=%d nextRetry=%s, want none (the finish run must not skip it)", attempts, retry)
 	}
+}
+
+// A game the agent asks for is never acknowledged, with the connection held
+// or closed after the work: the game server's print-server API has the client
+// acknowledge only the game data it sends unasked (agent 1.12.1).
+func TestAGameAskedForIsNotAcknowledged(t *testing.T) {
+	for name, mode := range map[string]func(*config.Config){"held": keepOpen, "closed": func(*config.Config) {}} {
+		t.Run(name, func(t *testing.T) {
+			a, ps, _, pushed := presenceApp(t, mode)
+			if err := a.pullGameResults(9, false); err != nil {
+				t.Fatal(err)
+			}
+			if got := pushedNumbers(pushed); len(got) != 1 || got[0] != 9 {
+				t.Fatalf("central was sent %v, want [9]", got)
+			}
+			time.Sleep(50 * time.Millisecond)
+			if got := ps.Requests("ack"); got != 0 {
+				t.Fatalf("acknowledgements = %d, want 0", got)
+			}
+		})
+	}
+}
+
+// A cache refresh, once a minute between games, acknowledges nothing: not the
+// list, and not the games it fetches. Before 1.12.1 every refresh ended with
+// {"success": true}, even one that fetched nothing.
+func TestACacheRefreshAcknowledgesNothing(t *testing.T) {
+	for name, mode := range map[string]func(*config.Config){"held": keepOpen, "closed": func(*config.Config) {}} {
+		t.Run(name, func(t *testing.T) {
+			a, ps, _, _ := presenceApp(t, withAll(mode, withCache(t)))
+			if err := a.refreshCache(false); err != nil { // fetches game 9
+				t.Fatal(err)
+			}
+			if !a.store.HasRaw(9) {
+				t.Fatal("game 9 was not cached")
+			}
+			if err := a.refreshCache(false); err != nil { // nothing to fetch
+				t.Fatal(err)
+			}
+			time.Sleep(50 * time.Millisecond)
+			if l, all, ack := ps.Requests("list"), ps.Requests("all"), ps.Requests("ack"); l != 2 || all != 1 || ack != 0 {
+				t.Fatalf("list %d, all %d, ack %d; want 2, 1, 0", l, all, ack)
+			}
+		})
+	}
+}
+
+// A game sent unasked while a request waits for its reply is acknowledged only
+// once that request is answered, so nothing the game server says back to the
+// acknowledgement could be taken as the reply. The acknowledgement goes with
+// the next poll's upkeep.
+func TestNoAcknowledgementGoesWhileARequestWaits(t *testing.T) {
+	a, ps, _, _ := presenceApp(t, keepOpen)
+	ps.AddGame(12, gamePayload(12))
+	connectLink(t, a)
+	release := make(chan struct{})
+	var once sync.Once
+	ps.OnRequest(func(command string) {
+		if command == "list" {
+			once.Do(func() {
+				ps.PushGame(12) // game 12 ends while the list is asked for
+				<-release       // and the list's reply is held back
+			})
+		}
+	})
+	done := make(chan error, 1)
+	go func() {
+		s := a.newResultsSession(false)
+		defer s.retire()
+		_, err := s.list()
+		done <- err
+	}()
+	waitUntil(t, "game 12 synced", 2*time.Second, func() bool { return a.isFetched(12) })
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	// The game server reads frames in order: an acknowledgement written while
+	// the list waited would be counted now, right after the list's reply.
+	time.Sleep(50 * time.Millisecond)
+	if got := ps.Requests("ack"); got != 0 {
+		t.Fatalf("acknowledgements sent while the list waited = %d, want 0", got)
+	}
+	a.psLink().maintain()
+	waitUntil(t, "the acknowledgement after the reply", 2*time.Second, func() bool { return ps.Requests("ack") == 1 })
+}
+
+// A game server that answers an acknowledgement (as one that mistakes it for
+// a request might, with an error) does not have that answer taken as the reply
+// to the agent's next request: the request waits a moment after it.
+func TestAnAnswerToAnAcknowledgementIsNotTakenAsTheNextReply(t *testing.T) {
+	logs := captureLog(t)
+	a, ps, _, _ := presenceApp(t, keepOpen)
+	ps.AddGame(12, gamePayload(12))
+	ps.AnswerAcks([]byte(`{"error":"Game not found"}`), 200*time.Millisecond)
+	connectLink(t, a)
+	ps.PushGame(12)
+	waitUntil(t, "the acknowledgement", 2*time.Second, func() bool { return ps.Requests("ack") == 1 })
+
+	s := a.newResultsSession(false)
+	defer s.retire()
+	if _, err := s.list(); err != nil {
+		t.Fatalf("the list after an acknowledgement: %v", err)
+	}
+	// A second game, a second acknowledgement and a second answer on the same
+	// connection: the answer is logged once per connection, in the game
+	// server's words, and both are counted as left.
+	ps.AddGame(13, gamePayload(13))
+	ps.PushGame(13)
+	waitUntil(t, "the second answer", 3*time.Second, func() bool {
+		return a.printServerReport()["messages_left"] == 2
+	})
+	if got := strings.Count(logs.String(), `sent an error no request was waiting for ("Game not found")`); got != 1 {
+		t.Fatalf("logged the answer %d times, want 1:\n%s", got, logs.String())
+	}
+}
+
+// An acknowledgement held back while a request waited is sent before the agent
+// closes the connection itself (PRINT_SERVER_KEEP_OPEN=false, the work done),
+// not dropped with it.
+func TestAnAcknowledgementHeldBackGoesBeforeTheConnectionCloses(t *testing.T) {
+	a, ps, _, _ := presenceApp(t, func(*config.Config) {})
+	ps.AddGame(12, gamePayload(12))
+	release := make(chan struct{})
+	var once sync.Once
+	ps.OnRequest(func(command string) {
+		if command == "list" {
+			once.Do(func() {
+				ps.PushGame(12)
+				<-release
+			})
+		}
+	})
+	done := make(chan error, 1)
+	go func() {
+		s := a.newResultsSession(false)
+		_, err := s.list()
+		s.retire()
+		done <- err
+	}()
+	waitUntil(t, "game 12 synced", 2*time.Second, func() bool { return a.isFetched(12) })
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	waitUntil(t, "the acknowledgement", 2*time.Second, func() bool { return ps.Requests("ack") == 1 })
+	waitUntil(t, "the connection to close", 2*time.Second, func() bool { return ps.OpenConnections() == 0 })
 }

@@ -30,6 +30,19 @@ import (
 // acknowledgement passes the print-server gate at the moment it is sent, and
 // a connection that drops is only dialled again between games.
 //
+// Acknowledgements ({"success": true}) go only for a whole game the game
+// server sent unasked, which is the data its print-server API has the client
+// acknowledge (agent 1.12.1). Never for a list or a game the agent asked for:
+// no other client does that, and before 1.12.1 the agent did it after every
+// cache refresh, once a minute between games. Never while a request waits for
+// its reply, and the next request waits linkAckSettle after one, so anything
+// the game server sends back to an acknowledgement promptly arrives with no
+// request waiting and is not taken as a reply (an error is logged once per
+// connection). Acknowledgements are best-effort: one owed is sent when the
+// gate is open and no request is waiting, by the next poll's upkeep or before
+// the last piece of work closes the connection (release), and is lost if the
+// connection ends first, whatever ends it.
+//
 // One reader takes every frame the game server sends and sorts it by what it
 // is, not by when it came:
 //   - the reply to the request waiting for one: a game list for "list"; for
@@ -61,7 +74,7 @@ type printLink struct {
 	app *App
 
 	dialMu sync.Mutex // one dial at a time
-	reqMu  sync.Mutex // one request waiting for a reply at a time
+	reqMu  sync.Mutex // one request waiting for a reply at a time; acknowledgements wait for it too
 	wmu    sync.Mutex // one write at a time
 
 	mu          sync.Mutex
@@ -89,6 +102,8 @@ type printLink struct {
 	pushing     chan struct{} // bounds the games being handled at once
 	// replyWait is how long a request waits for its reply (tests shorten it).
 	replyWait time.Duration
+	// ackSettle is linkAckSettle (tests may change it).
+	ackSettle time.Duration
 }
 
 const (
@@ -104,6 +119,9 @@ const (
 	// maxPushedAtOnce bounds the games sent unasked being handled at once;
 	// one beyond it is left to be asked for between games.
 	maxPushedAtOnce = 4
+	// linkAckSettle is how long the next request waits after an
+	// acknowledgement (see the type's comment).
+	linkAckSettle = 500 * time.Millisecond
 )
 
 // errLinkClosed is a request made when the connection has just closed.
@@ -246,7 +264,7 @@ func (w *linkWaiter) wants(f linkFrame) bool {
 }
 
 func newPrintLink(a *App) *printLink {
-	return &printLink{app: a, pushing: make(chan struct{}, maxPushedAtOnce), replyWait: linkReplyWait}
+	return &printLink{app: a, pushing: make(chan struct{}, maxPushedAtOnce), replyWait: linkReplyWait, ackSettle: linkAckSettle}
 }
 
 // connected reports whether a connection is open.
@@ -461,9 +479,29 @@ func (l *printLink) take(gen uint64, raw []byte) {
 		log.Print("[agent] print server: the game server sent its auto-print setting; the agent does not print, so it was left (said once per connection)")
 	case frameGame, framePartGame:
 		log.Print("[agent] print server: the game server sent game data with no game number; it was left (said once per connection)")
+	case frameError:
+		// Seen after an acknowledgement, it says the game server answers them
+		// (agent 1.12.1). The game server's own words, cut short: an error
+		// carries no game data.
+		log.Printf("[agent] print server: the game server sent an error no request was waiting for (%q); it was left (said once per connection)", errorText(raw))
 	case frameOther:
 		log.Printf("[agent] print server: the game server sent a message the agent does not recognise (keys: %s); it was left (said once per connection)", strings.Join(f.keys, ", "))
 	}
+}
+
+// errorText is an error frame's message, on one line and at most 120
+// characters, or "" when it is not a string.
+func errorText(raw []byte) string {
+	var top struct {
+		Error any `json:"error"`
+	}
+	_ = json.Unmarshal(raw, &top)
+	s, _ := top.Error.(string)
+	s = strings.Join(strings.Fields(s), " ")
+	if r := []rune(s); len(r) > 120 {
+		s = string(r[:120]) + "…"
+	}
+	return s
 }
 
 // takePushed hands a game the game server sent unasked to the App, off the
@@ -479,63 +517,57 @@ func (l *printLink) takePushed(gen uint64, game int, raw []byte) {
 	go func() {
 		defer func() { <-l.pushing }()
 		l.app.takePushedGame(game, raw)
-		l.mu.Lock()
-		if gen == l.gen && l.conn != nil {
-			l.acksOwed++
-		}
-		l.mu.Unlock()
-		l.flushAcks()
+		l.acknowledge(gen)
 	}()
 }
 
 // request sends cmd and waits for its reply: game is the game asked for, or 0
-// for the game list. It also returns the connection the reply came on, which
-// an acknowledgement of it must go back on (see acknowledge). The gate is
-// checked as it is sent, whatever passed it before: the connection is held
-// through games, so having one proves nothing.
-func (l *printLink) request(cmd map[string]any, game int) ([]byte, uint64, error) {
+// for the game list. The gate is checked as it is sent, whatever passed it
+// before: the connection is held through games, so having one proves nothing.
+// A reply is never acknowledged (see the type's comment).
+func (l *printLink) request(cmd map[string]any, game int) ([]byte, error) {
 	l.reqMu.Lock()
 	defer l.reqMu.Unlock()
 	if err := l.app.printServerGate(); err != nil {
-		return nil, 0, err
+		return nil, err
 	}
 	w := &linkWaiter{game: game, reply: make(chan []byte, 1)}
 	l.mu.Lock()
 	rc, gen, done := l.conn, l.gen, l.done
 	if rc == nil {
 		l.mu.Unlock()
-		return nil, 0, errLinkClosed
+		return nil, errLinkClosed
 	}
 	l.waiter = w
 	l.mu.Unlock()
 
 	if err := l.write(rc, cmd); err != nil {
 		l.end(gen, err, false)
-		return nil, 0, err
+		return nil, err
 	}
 	t := time.NewTimer(l.replyWait)
 	defer t.Stop()
 	select {
 	case raw := <-w.reply:
-		return raw, gen, nil
+		return raw, nil
 	case <-done:
 		select {
 		case raw := <-w.reply:
-			return raw, gen, nil // the reply came just before the connection ended
+			return raw, nil // the reply came just before the connection ended
 		default:
 		}
 		l.mu.Lock()
 		why := l.endErr
 		l.mu.Unlock()
 		if why == nil {
-			return nil, 0, errLinkClosed
+			return nil, errLinkClosed
 		}
-		return nil, 0, fmt.Errorf("%w: %v", errLinkClosed, why)
+		return nil, fmt.Errorf("%w: %v", errLinkClosed, why)
 	case <-t.C:
 		// No reply: the connection is not trusted for the next request.
 		err := fmt.Errorf("no reply from the print server within %s", shortDuration(l.replyWait))
 		l.end(gen, err, false)
-		return nil, 0, err
+		return nil, err
 	}
 }
 
@@ -546,8 +578,8 @@ func (l *printLink) write(rc *results.Client, cmd map[string]any) error {
 	return rc.Send(cmd, 5*time.Second)
 }
 
-// acknowledge tells the game server data that came on connection gen was
-// received, if the gate is open (best-effort, as before). Data from a
+// acknowledge tells the game server a whole game it sent unasked on
+// connection gen was received, if the gate is open (best-effort). Data from a
 // connection that has since ended is not acknowledged on the next one.
 func (l *printLink) acknowledge(gen uint64) {
 	l.mu.Lock()
@@ -559,16 +591,22 @@ func (l *printLink) acknowledge(gen uint64) {
 }
 
 // flushAcks sends the acknowledgements owed on the current connection, if
-// the gate is open; otherwise they wait for maintain.
+// the gate is open and no request is waiting for its reply; otherwise they
+// wait for maintain, after the next poll. Having sent any, it holds off the
+// next request for ackSettle (see the type's comment).
 func (l *printLink) flushAcks() {
 	if l.app.printServerGate() != nil {
 		return
 	}
+	if !l.reqMu.TryLock() {
+		return
+	}
+	defer l.reqMu.Unlock()
 	l.mu.Lock()
 	rc, n := l.conn, l.acksOwed
 	l.acksOwed = 0
 	l.mu.Unlock()
-	if rc == nil {
+	if rc == nil || n == 0 {
 		return
 	}
 	for i := 0; i < n; i++ {
@@ -576,6 +614,7 @@ func (l *printLink) flushAcks() {
 			return // the reader sees the connection end
 		}
 	}
+	time.Sleep(l.ackSettle)
 }
 
 // use and release count the sessions using the connection. The last to finish
@@ -595,6 +634,9 @@ func (l *printLink) release() {
 	gen := l.gen
 	l.mu.Unlock()
 	if closeIt {
+		// An acknowledgement held back while a request waited goes before
+		// the agent closes the connection (with the gate open, as always).
+		l.flushAcks()
 		l.end(gen, errors.New("work done"), true)
 	}
 }

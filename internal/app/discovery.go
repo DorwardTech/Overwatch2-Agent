@@ -55,12 +55,17 @@ func (a *App) awaitOzone(ctx context.Context) bool {
 	var logged string
 	var loggedAt time.Time
 	c, ok := a.lib.Wait(ctx, a.libWindow, func(r ozonelib.Result, windowDone bool) {
+		// What the heartbeat tells central meanwhile (see ozonelink.go).
+		text := a.lib.NotReadyReason()
+		a.ozLink.discovering(text, time.Now())
+		if windowDone && r.Outcome != ozonelib.Selected {
+			a.ozLink.stalled() // nothing will be chosen: say so now
+		}
 		// A lone server is being confirmed: it is chosen, or the reason
 		// changes, within a window.
 		if !windowDone || r.Outcome == ozonelib.Selected {
 			return
 		}
-		text := a.lib.NotReadyReason()
 		if text == "" || (text == logged && time.Since(loggedAt) < 5*time.Minute) {
 			return
 		}
@@ -80,6 +85,7 @@ func (a *App) awaitOzone(ctx context.Context) bool {
 	a.pin = c
 	a.pinnedAt = time.Now()
 	a.lib.SetSelected(c)
+	a.ozLink.chosen(a.pinnedAt)
 	if a.bus != nil {
 		a.bus.SetHost(c.IP.String())
 		go a.bus.Run(ctx)

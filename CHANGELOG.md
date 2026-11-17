@@ -6,6 +6,39 @@ first.
 
 The Site Agent and Overwatch have their own version numbers.
 
+## [1.12.1] — 2026-11-17
+
+Two fixes to how the agent works with the game server's print server. There is nothing to set up. Docker venues pull the 1.12.1 image; Windows venues run the 1.12.1 installer.
+
+### Fixed
+
+- **The agent no longer sends the print server a "received" message it isn't expecting.** It sent one after every refresh of its local copy of games (about once a minute between games, even when there was nothing new) and after every game it asked for. The print server expects that message only for a game's results it sends by itself as the game ends, so that is now the only time the agent sends it. The game server could log the extra message as an error, as a request for "game 0".
+- **A game the game server drops no longer stops the next game with its number from reaching Overwatch.** When the game server throws away a game it never saved, such as a start-up game, the game number goes back by one. The agent took that as the game finishing, asked for it until it gave up, and listed it as abandoned; the real game that took that number next was then never sent to Overwatch. Now a game number going back is not taken as a finished game, and a number the agent gave up on is tried again when a new game uses it.
+
+### Notes
+
+- A game listed as abandoned for this reason clears when the agent restarts on 1.12.1. If a real game was played under that number since, **Fetch missing games** on the Analyzer brings it in.
+
+## [1.12.0] — 2026-11-16
+
+The agent now keeps checking in with Overwatch while it can't reach the game server, and says why, so Overwatch no longer shows it as offline. There is nothing to set up. Docker venues pull the 1.12.0 image; Windows venues run the 1.12.0 installer.
+
+### Added
+
+- **The agent keeps checking in while it can't reach the game server.** It used to send Overwatch nothing until it could reach the game server again, so Overwatch showed the agent as offline. Now it checks in every 15 seconds (`IDLE_POLL_INTERVAL`) until it reaches the game server, the first time 2 seconds after it loses it (unless it is back by then), and says that it can't reach it, since when, how many tries in a row have failed, and the last error. Overwatch 1.60.0 and later show the venue as **Game server unreachable** instead of offline.
+- **It says so while it is still looking for the game server, too.** With automatic discovery, until it has chosen a game server, it checks in the same way and says it is still looking, and why.
+- **Commands still arrive.** While it can't reach the game server, the agent still picks up commands from Overwatch every minute (`SLOW_POLL_INTERVAL`). Commands that don't need the game server, such as restarting the agent, refreshing its status or clearing its local copy of games, work as usual. Commands that need the game server wait until it is back, as before, and the agent's log notes each one once, not every minute.
+- **The status report says whether the game server can be reached.** Every status report to Overwatch, and the status on the agent's admin page, now says whether the agent is connected to the game server, can't reach it, or is still looking for it; since when; when it last reached it; how many tries in a row have failed; and, while it can't reach it, the last error.
+
+### Notes
+
+- Nothing extra is sent to the game server: the agent only keeps trying to connect, as before. The check-ins go to Overwatch only, and carry no readings, so Overwatch keeps the last readings it had and doesn't take them as new.
+- When the agent starts, it gives the game server a moment before reporting it unreachable, so a normal start doesn't show up as a problem: until its first try to connect fails, or for twice `IDLE_POLL_INTERVAL` but no more than 20 seconds. With automatic discovery it says so once it has listened for the game server for its usual 11 seconds and chosen none, and otherwise waits up to 24 seconds for a normal discovery to finish.
+- If the agent can't reach Overwatch either, it keeps only its latest check-in waiting to be sent, so check-ins never push the readings it is holding out of its queue.
+- With `IDLE_POLL_INTERVAL` at 18 seconds or more, the agent warns at start: when the game server stops answering, more than 30 seconds can pass before its first check-in, and Overwatch's **Agent offline** alert may fire for an agent that is running. The Windows setup page and the example settings now say to keep it at 17 seconds or less.
+- The readiness check (`/readyz`) still means that readings are reaching Overwatch. A check-in doesn't count.
+- Nothing changes in legacy mode.
+
 ## [1.11.0] — 2026-11-16
 
 The agent now keeps one connection to the print server open, instead of connecting and disconnecting for every game. One new setting, optional: the default suits every venue. Docker venues pull the 1.11.0 image; Windows venues run the 1.11.0 installer.

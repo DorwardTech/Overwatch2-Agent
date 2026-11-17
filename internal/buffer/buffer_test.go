@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -255,5 +257,65 @@ func TestPopSentStillDiscriminatesAfterALoad(t *testing.T) {
 	}
 	if b.Len() != 1 {
 		t.Fatalf("Len = %d, want the second restored entry still queued", b.Len())
+	}
+}
+
+// A heartbeat queued while central is unreachable replaces the one before it,
+// so a long outage leaves one heartbeat queued, not one per tick, and the
+// telemetry queued ahead of them is never pushed out.
+func TestPushReplacingKeepsOnlyTheLatestOfItsKind(t *testing.T) {
+	b := New(4)
+	b.Push("t-1", []byte("tele1"))
+	b.PushReplacing("hb-", "hb-2", []byte("beat2"))
+	b.Push("t-3", []byte("tele3"))
+	for i := 4; i < 100; i++ {
+		b.PushReplacing("hb-", "hb-"+strconv.Itoa(i), []byte("beat"))
+	}
+
+	var keys []string
+	for {
+		e, ok := b.Peek()
+		if !ok {
+			break
+		}
+		keys = append(keys, e.Key)
+		b.PopSent(e)
+	}
+	want := []string{"t-1", "t-3", "hb-99"}
+	if strings.Join(keys, ",") != strings.Join(want, ",") {
+		t.Fatalf("queue = %v, want %v: the telemetry kept in order and only the latest heartbeat, last", keys, want)
+	}
+}
+
+// The byte count follows the entries it drops, or the byte budget would
+// start evicting telemetry that fits.
+func TestPushReplacingReleasesTheBytesItDrops(t *testing.T) {
+	b := New(10)
+	b.Push("t-1", make([]byte, 100))
+	b.PushReplacing("hb-", "hb-2", make([]byte, 30))
+	b.PushReplacing("hb-", "hb-3", make([]byte, 40))
+
+	if got := b.Bytes(); got != 140 {
+		t.Fatalf("Bytes = %d, want 140 (100 telemetry + the one 40-byte heartbeat)", got)
+	}
+	if b.Len() != 2 {
+		t.Fatalf("Len = %d, want 2", b.Len())
+	}
+}
+
+// A heartbeat being sent when the next one replaces it is not popped in its
+// place: PopSent leaves the new head alone.
+func TestPushReplacingWhileTheOldOneIsInFlight(t *testing.T) {
+	b := New(10)
+	b.PushReplacing("hb-", "hb-1", []byte("beat1"))
+	sent, _ := b.Peek()
+	b.PushReplacing("hb-", "hb-2", []byte("beat2"))
+
+	if b.PopSent(sent) {
+		t.Fatal("PopSent removed the newer heartbeat in place of the one it was given")
+	}
+	head, _ := b.Peek()
+	if head.Key != "hb-2" {
+		t.Fatalf("head = %q, want hb-2", head.Key)
 	}
 }

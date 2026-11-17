@@ -189,8 +189,9 @@ func TestAutoModeConnectsToTheAnnouncedServer(t *testing.T) {
 	waitUntil(t, "the message bus", 3*time.Second, a.bus.Connected)
 
 	// The first poll is a slow one: its self-report carries what was heard.
-	waitUntil(t, "a buffered push", 3*time.Second, func() bool { _, ok := a.buf.Peek(); return ok })
-	e, _ := a.buf.Peek()
+	// (Heartbeats sent while nothing was announced come before it.)
+	waitUntil(t, "a buffered push", 3*time.Second, func() bool { _, ok := firstTelemetry(a); return ok })
+	e, _ := firstTelemetry(a)
 	var payload struct {
 		Agent struct {
 			LIB map[string]any `json:"lib"`

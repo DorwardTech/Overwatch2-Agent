@@ -198,6 +198,7 @@
     stat("State", '<span class="badge ' + stateBadge(o.state) + '">' + (o.state ?? "—") + "</span>");
     stat("Server mode", o.server_mode ?? "—");
     stat("O-Zone address", ozoneAddress(o));
+    if (o.ozone_link) stat("O-Zone link", ozoneLink(o.ozone_link));
     stat("Announcement", announcement(o.lib));
     stat("Cached games", o.games ?? "—");
     stat("Message bus", o.msg_bus_connected ? '<span class="badge ok">connected</span>' : '<span class="badge warn">down</span>');
@@ -240,6 +241,19 @@
     const sel = lib.selected;
     return esc(o.ozone_host) + ' <span class="faint">· auto' +
       (sel ? " · site " + esc(sel.sid_raw || sel.sid) + " arena " + esc(sel.arena) : "") + "</span>";
+  }
+
+  // Whether the agent can reach the game server (o.ozone_link, agent 1.12.0):
+  // connected, can't reach it, or still looking for it; since when, failed
+  // tries in a row, when it last worked, and the last error on hover. The error text came off the
+  // network, so it is escaped.
+  function ozoneLink(link) {
+    if (link.state === "connected") return '<span class="badge ok">connected</span>';
+    const word = link.state === "discovering" ? "looking for it" : "can't reach it";
+    const tries = link.attempts ? ", " + esc(link.attempts) + (link.attempts === 1 ? " try" : " tries") : "";
+    const worked = link.last_ok_at ? ", last worked " + ago(link.last_ok_at) : "";
+    return warnBadge(word, link.last_error) +
+      (link.since ? ' <span class="faint">· ' + ago(link.since) + tries + worked + "</span>" : "");
   }
 
   function announcement(lib) {
