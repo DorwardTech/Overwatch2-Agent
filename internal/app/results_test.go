@@ -451,3 +451,100 @@ func TestPollCadenceNeedsEveryHolderToRelease(t *testing.T) {
 		t.Errorf("polling every %s with nothing touching the print server, want the idle rate %s", got, a.cfg.IdlePollInterval)
 	}
 }
+
+// queuedFetch reports whether game n waits to be fetched.
+func queuedFetch(a *App, n int) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	_, ok := a.pendingFetch[n]
+	return ok
+}
+
+// The game server dropping a game it never stored (a start-up game, say)
+// puts the game number back. That is not the game finishing: it is never
+// asked for, and the real game that takes the number next is, when it ends.
+func TestAStepBackInTheGameNumberIsNotAFinishedGame(t *testing.T) {
+	a := New(config.Config{CentralURL: "http://central.invalid", Token: "t"})
+	a.markFetched(3509)
+	a.checkGameResults(map[string]any{"SERVERMODE": 2, "GAMENUM": 3509})
+	a.checkGameResults(map[string]any{"SERVERMODE": 4, "GAMENUM": 3510}) // a start-up game
+	a.checkGameResults(map[string]any{"SERVERMODE": 2, "GAMENUM": 3509}) // dropped, never stored
+	if queuedFetch(a, 3510) {
+		t.Fatal("the dropped game 3510 was queued to be fetched")
+	}
+
+	a.checkGameResults(map[string]any{"SERVERMODE": 4, "GAMENUM": 3510}) // the real game 3510
+	a.checkGameResults(map[string]any{"SERVERMODE": 7, "GAMENUM": 3510})
+	if !queuedFetch(a, 3510) {
+		t.Fatal("the real game 3510 was not queued when it finished")
+	}
+}
+
+// A game moving forward is still the previous one finishing, as before.
+func TestAGameNumberMovingForwardFinishesThePreviousGame(t *testing.T) {
+	a := New(config.Config{CentralURL: "http://central.invalid", Token: "t"})
+	a.checkGameResults(map[string]any{"SERVERMODE": 4, "GAMENUM": 41})
+	a.checkGameResults(map[string]any{"SERVERMODE": 4, "GAMENUM": 42}) // 41's finish was missed
+	if !queuedFetch(a, 41) {
+		t.Fatal("game 41 was not queued when the number moved on to 42")
+	}
+}
+
+// A game given up on is forgotten when the game server moves on to a game
+// with its number: that is a new game, fetched when it ends. A step back onto
+// a number given up on (the last stored game, which the print server could not
+// serve) changes nothing.
+func TestAGameNumberInUseAgainIsNoLongerAbandoned(t *testing.T) {
+	a := New(config.Config{CentralURL: "http://central.invalid", Token: "t"})
+	a.markFetched(3509)
+	a.checkGameResults(map[string]any{"SERVERMODE": 2, "GAMENUM": 3509})
+	// A start-up game reaches its finish and is dropped unstored, so it is
+	// asked for until the agent gives up on it.
+	a.checkGameResults(map[string]any{"SERVERMODE": 7, "GAMENUM": 3510})
+	for i := 0; i < maxFetchAttempts; i++ {
+		a.noteFetchFailure(3510, errTest)
+	}
+	if _, givenUp := a.resultsBacklog(); len(givenUp) != 1 || givenUp[0] != 3510 {
+		t.Fatalf("given up on %v, want [3510]", givenUp)
+	}
+	a.checkGameResults(map[string]any{"SERVERMODE": 2, "GAMENUM": 3509}) // the step back
+	if _, givenUp := a.resultsBacklog(); len(givenUp) != 1 {
+		t.Fatalf("given up on %v after a step back, want [3510]", givenUp)
+	}
+
+	// The real game 3510 starts: no longer given up on, and fetched from its
+	// first try when it ends.
+	a.checkGameResults(map[string]any{"SERVERMODE": 4, "GAMENUM": 3510})
+	if _, givenUp := a.resultsBacklog(); len(givenUp) != 0 {
+		t.Fatalf("still given up on %v once 3510 was played again", givenUp)
+	}
+	a.checkGameResults(map[string]any{"SERVERMODE": 7, "GAMENUM": 3510})
+	a.mu.Lock()
+	p := a.pendingFetch[3510]
+	a.mu.Unlock()
+	if p == nil || p.attempts != 0 {
+		t.Fatalf("game 3510 waiting = %+v, want queued with no attempts", p)
+	}
+
+	// A game still waiting under the number the game server moves on to
+	// starts again from its first try.
+	a.queueFetch(3511)
+	a.noteFetchFailure(3511, errTest)
+	a.checkGameResults(map[string]any{"SERVERMODE": 4, "GAMENUM": 3511})
+	a.mu.Lock()
+	q := a.pendingFetch[3511]
+	a.mu.Unlock()
+	if q == nil || q.attempts != 0 || !q.nextRetry.IsZero() {
+		t.Fatalf("game 3511 waiting = %+v, want queued with no attempts", q)
+	}
+
+	// A step back onto a number given up on leaves it given up on.
+	a.queueFetch(347)
+	for i := 0; i < maxFetchAttempts; i++ {
+		a.noteFetchFailure(347, errTest)
+	}
+	a.checkGameResults(map[string]any{"SERVERMODE": 2, "GAMENUM": 347})
+	if _, givenUp := a.resultsBacklog(); len(givenUp) != 1 || givenUp[0] != 347 {
+		t.Fatalf("given up on %v after a step back onto 347, want [347]", givenUp)
+	}
+}

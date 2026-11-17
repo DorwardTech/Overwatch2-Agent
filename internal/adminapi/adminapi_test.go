@@ -169,6 +169,25 @@ func TestControlPanelShowsTheAnnouncement(t *testing.T) {
 	}
 }
 
+// The overview's game server link (ozone_link, agent 1.12.0) is on the page:
+// connected, can't reach it, or still looking for it, with the last error on
+// hover, escaped because it came off the network.
+func TestControlPanelShowsTheGameServerLink(t *testing.T) {
+	s, _ := newServer()
+	body := do(t, s.Handler(), "GET", "/", "").Body.String()
+	for _, want := range []string{
+		`if (o.ozone_link) stat("O-Zone link", ozoneLink(o.ozone_link));`,
+		`"can't reach it"`,
+		`"looking for it"`,
+		`warnBadge(word, link.last_error)`,
+		`", last worked " + ago(link.last_ok_at)`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the control panel is missing %s", want)
+		}
+	}
+}
+
 func TestAPIStillGatedAfterUIAdded(t *testing.T) {
 	s, _ := newServer()
 	h := s.Handler()

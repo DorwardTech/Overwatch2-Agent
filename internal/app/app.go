@@ -177,7 +177,7 @@ type App struct {
 	pusher       *push.Pusher
 	buf          *buffer.Buffer
 	health       *health.Health
-	seq          int64
+	seq          atomic.Int64 // the last push_seq taken: collect and the heartbeat take them (see nextSeq)
 	startedAt    time.Time
 	lastGameNum  int
 	lastBusGame  int          // game number from the most recent GAME_START bus event
@@ -215,6 +215,7 @@ type App struct {
 	mu              sync.Mutex           // guards fetchedGames + pendingFetch + givenUpFetch + queueSeq + finishHold + lastBusGame
 	resultsMu       sync.Mutex           // serialises O-Zone results-API access
 	cmdBusy         atomic.Bool          // single-flight for command processing
+	deferLogged     map[int]string       // the reason each command was last logged deferred with (logDeferred)
 	collectBusy     atomic.Bool          // single-flight for a "collect from central" run
 	fetchBusy       atomic.Bool          // single-flight for a pending-results drain
 	printServerBusy atomic.Int32         // depth of in-progress print-server work (see nextPollInterval)
@@ -237,6 +238,7 @@ type App struct {
 	// Discovery timings, fields so tests can shorten them.
 	libWindow   time.Duration // listen this long before choosing
 	followAfter time.Duration // our address silent this long before following a move
+	lossDelay   time.Duration // a lost link stays down this long before its first heartbeat
 	probe       func(ctx context.Context, host, port string, timeout time.Duration) (int, error)
 	// mono replaces the monotonic clock (tests only; see monoNow).
 	mono func() time.Duration
@@ -252,6 +254,9 @@ type App struct {
 	site siteInfo
 	// ps tracks whether the print server answers (see printserver.go).
 	ps printServerPresence
+	// ozLink tracks whether the game server's WebSocket API answers (see
+	// ozonelink.go).
+	ozLink ozoneLink
 	// dialResults dials the print server: results.Dial, replaced in tests.
 	dialResults func(host, port string, timeout time.Duration) (*results.Client, error)
 	// link is the one connection to the print server (see printlink.go and
@@ -270,13 +275,10 @@ type App struct {
 
 func New(cfg config.Config) *App {
 	a := &App{
-		cfg:    cfg,
-		pusher: push.New(cfg.CentralURL, cfg.Token),
-		buf:    buffer.New(cfg.BufferMax),
-		health: health.New(),
-		// Seed push_seq from the clock so idempotency keys never repeat across
-		// restarts (pushes are >1s apart, so seconds always outrun the counter).
-		seq:          time.Now().Unix(),
+		cfg:          cfg,
+		pusher:       push.New(cfg.CentralURL, cfg.Token),
+		buf:          buffer.New(cfg.BufferMax),
+		health:       health.New(),
 		startedAt:    time.Now(),
 		fetchedGames: map[int]bool{},
 		pendingFetch: map[int]*pendingGame{},
@@ -291,13 +293,20 @@ func New(cfg config.Config) *App {
 		// heard at least twice before one is chosen.
 		libWindow:   11 * time.Second,
 		followAfter: 60 * time.Second,
+		lossDelay:   2 * time.Second,
 		probe:       ozone.Probe,
 		dialResults: results.Dial,
 	}
+	// Seed push_seq from the clock so idempotency keys never repeat across
+	// restarts (pushes are >1s apart, so seconds always outrun the counter).
+	a.seq.Store(time.Now().Unix())
 	a.psLink()
 	if !cfg.OzoneDiscover {
 		a.setOzoneHost(cfg.OzoneHost)
 	}
+	// No heartbeat for the start grace unless an attempt fails (or discovery
+	// stalls) first: a normal first connection is not an outage.
+	a.ozLink.start(cfg.OzoneDiscover, a.startGrace(), a.startedAt)
 	// The announcement listener: always in auto mode, and by default with a
 	// fixed host too, where it only reports what it hears.
 	if cfg.OzoneDiscover || cfg.LIBListener {
@@ -414,6 +423,8 @@ func (a *App) Overview() map[string]any {
 	overview["frames"] = a.frames.report()
 	// Whether the print server answers (same block as the self-report's).
 	overview["print_server"] = a.printServerReport()
+	// Whether the game server answers (same block as the self-report's).
+	overview["ozone_link"] = a.ozLink.report()
 	return overview
 }
 
@@ -515,6 +526,9 @@ func (a *App) Run(ctx context.Context) {
 	// Started before the dial loop and outliving every reconnect: telemetry
 	// already buffered still deserves delivering while O-Zone is unreachable.
 	go a.deliverLoop(ctx)
+	// And while it is unreachable (or not yet found), central still hears
+	// from the agent, and why (see ozonelink.go).
+	go a.heartbeatLoop(ctx)
 
 	if a.cfg.OzoneDiscover && !a.awaitOzone(ctx) {
 		return
@@ -528,6 +542,7 @@ func (a *App) Run(ctx context.Context) {
 		host := a.ozoneAddr()
 		client, err := ozone.Dial(host, a.cfg.OzonePort)
 		if err != nil {
+			a.ozLink.failed(err, time.Now())
 			log.Printf("[agent] O-Zone connect failed: %v (retry in %s)", err, backoff)
 			if !sleepCtx(ctx, backoff) {
 				return
@@ -565,6 +580,7 @@ func (a *App) pollLoop(ctx context.Context, client *ozone.Client) {
 			return false // logged; the run is ending to choose again
 		}
 		if err != nil {
+			a.ozLink.failed(err, time.Now())
 			log.Printf("[agent] poll error: %v (reconnecting)", err)
 			return false
 		}
@@ -743,6 +759,11 @@ func (a *App) collect(client *ozone.Client, slow bool) ([]byte, string, error) {
 		a.pollUnsettled.Store(true)
 		return nil, "", err
 	}
+	// Both replies are in: the link works. Recorded here, not after collect
+	// returns, so this poll's own self-report already says so, and so a
+	// heartbeat that found the link down is queued before this push (see
+	// ozoneLink.whileDown).
+	a.ozLink.ok(time.Now())
 
 	// Only now, with both replies in, may a reading open the gate or clear a
 	// game. A frame dropped meanwhile that could be the server state (one
@@ -805,9 +826,9 @@ func (a *App) collect(client *ozone.Client, slow bool) ([]byte, string, error) {
 		a.checkGameResults(server)
 	}
 
-	a.seq++
+	seq := a.nextSeq()
 	payload := map[string]any{
-		"push_seq":     a.seq,
+		"push_seq":     seq,
 		"client_ts":    time.Now().UTC().Format(time.RFC3339),
 		"server_state": server,
 		"packs":        packs["PACKS"],
@@ -857,27 +878,44 @@ func (a *App) collect(client *ozone.Client, slow bool) ([]byte, string, error) {
 	a.frames.sample(frameCountsOf(client))
 
 	if slow {
-		// Agent self-report: version + health, so central can surface it.
-		pending, givenUp := a.resultsBacklog()
-		payload["agent"] = map[string]any{
-			"version":          a.cfg.Version,
-			"buffered":         a.buf.Len(),
-			"uptime_seconds":   int(time.Since(a.startedAt).Seconds()),
-			"poll_interval":    int(a.cfg.PollInterval.Seconds()),
-			"results":          a.cfg.ResultsEnabled,
-			"commands":         a.cfg.CommandsEnabled,
-			"results_pending":  pending,
-			"results_given_up": givenUp,
-			"frames":           a.frames.report(),
-			"print_server":     a.printServerReport(),
-		}
-		if a.lib != nil {
-			payload["agent"].(map[string]any)["lib"] = a.lib.Report()
-		}
+		payload["agent"] = a.selfReport()
 	}
 
 	data, err := json.Marshal(payload)
-	return data, strconv.FormatInt(a.seq, 10), err
+	return data, strconv.FormatInt(seq, 10), err
+}
+
+// nextSeq takes the next push_seq.
+func (a *App) nextSeq() int64 { return a.seq.Add(1) }
+
+// selfReport is the agent's self-report: version and health, so central can
+// surface it. Every slow poll's push carries it, and so does every heartbeat
+// (see sendHeartbeat).
+func (a *App) selfReport() map[string]any {
+	return a.selfReportWith(a.ozLink.report())
+}
+
+// selfReportWith is selfReport with the ozone_link block given: the heartbeat
+// builds it while holding the link's tracker (see ozoneLink.whileDown).
+func (a *App) selfReportWith(link map[string]any) map[string]any {
+	pending, givenUp := a.resultsBacklog()
+	r := map[string]any{
+		"version":          a.cfg.Version,
+		"buffered":         a.buf.Len(),
+		"uptime_seconds":   int(time.Since(a.startedAt).Seconds()),
+		"poll_interval":    int(a.cfg.PollInterval.Seconds()),
+		"results":          a.cfg.ResultsEnabled,
+		"commands":         a.cfg.CommandsEnabled,
+		"results_pending":  pending,
+		"results_given_up": givenUp,
+		"frames":           a.frames.report(),
+		"print_server":     a.printServerReport(),
+		"ozone_link":       link,
+	}
+	if a.lib != nil {
+		r["lib"] = a.lib.Report()
+	}
+	return r
 }
 
 // enqueue hands a batch to the delivery goroutine and returns immediately.
@@ -893,7 +931,27 @@ func (a *App) collect(client *ozone.Client, slow bool) ([]byte, string, error) {
 // over. Central being slow, or down, no longer stretches the sampling clock.
 func (a *App) enqueue(key string, payload []byte) {
 	a.buf.Push(key, payload)
+	a.signalDelivery()
+}
 
+// logDeferred logs a command the print-server gate deferred, once per command
+// and reason: central hands it out again on the next fetch, every minute for
+// as long as the gate stays shut (all night, with the game server off). Only
+// processCommands calls it, and cmdBusy keeps that to one at a time.
+func (a *App) logDeferred(c push.Command, gate error) {
+	reason := gate.Error()
+	if a.deferLogged[c.ID] == reason {
+		return
+	}
+	if a.deferLogged == nil || len(a.deferLogged) >= 256 {
+		a.deferLogged = map[int]string{} // bounded: commands that never came back
+	}
+	a.deferLogged[c.ID] = reason
+	log.Printf("[agent] commands: deferred %s #%d — %v (logged once until the reason changes)", c.Type, c.ID, gate)
+}
+
+// signalDelivery wakes deliverLoop for an entry just queued.
+func (a *App) signalDelivery() {
 	select {
 	case a.deliverSignal <- struct{}{}:
 	default: // already signalled and not yet serviced; the drain will see this entry
@@ -950,7 +1008,11 @@ func (a *App) drainBuffer() {
 			// which has not been sent. A false return means capacity already
 			// removed it, so there is nothing to do but carry on.
 			a.buf.PopSent(entry)
-			a.health.MarkPush()
+			// A heartbeat says the agent is up, not that telemetry is
+			// reaching central, which is what /readyz means.
+			if !isHeartbeat(entry.Key) {
+				a.health.MarkPush()
+			}
 			continue
 		}
 		if push.Unsendable(err) {
@@ -974,6 +1036,14 @@ func (a *App) drainBuffer() {
 // mode — the O-Zone print server must never be hit during active play, as it
 // degrades game performance. Back-to-back games therefore defer the previous
 // game's fetch until the server next goes idle/finished.
+//
+// Only a game number moving forward says the previous game finished (agent
+// 1.12.1). A step back is the game server dropping a game it never stored:
+// a start-up game, say, numbered 3510 and discarded, so the number goes back
+// to 3509. Taken as a finish, 3510 was asked for until the agent gave up on
+// it, and the real game 3510 that followed was then never fetched. Numbers
+// that start again from 1 step back too; a game that really finished is still
+// seen by its finish modes (7, 18) or the message bus.
 func (a *App) checkGameResults(server map[string]any) {
 	gameNum := toInt(server["GAMENUM"])
 	mode := toInt(server["SERVERMODE"])
@@ -982,8 +1052,16 @@ func (a *App) checkGameResults(server map[string]any) {
 	switch {
 	case (mode == 7 || mode == 18) && gameNum > 0: // GAME_FINISH / POST_GAME
 		finished = gameNum
-	case a.lastGameNum > 0 && gameNum > 0 && gameNum != a.lastGameNum: // advanced to a new game
+	case a.lastGameNum > 0 && gameNum > a.lastGameNum: // advanced to a new game
 		finished = a.lastGameNum
+	}
+	if a.lastGameNum > 0 && gameNum > a.lastGameNum {
+		// A number in use again is a new game, whatever happened to a game
+		// that had it before (one discarded, then given up on).
+		a.forgetAbandoned(gameNum)
+	}
+	if a.lastGameNum > 0 && gameNum > 0 && gameNum < a.lastGameNum {
+		log.Printf("[agent] results: the game number went back from #%d to #%d; #%d is not taken as a finished game", a.lastGameNum, gameNum, a.lastGameNum)
 	}
 	if gameNum > 0 {
 		a.lastGameNum = gameNum
@@ -1089,6 +1167,21 @@ func (a *App) fetchGameResults(gameNumber int) (deferred bool) {
 	return false
 }
 
+// forgetAbandoned takes game n off the abandoned list, with any attempts
+// counted against it: the game server has moved on to a game with that number,
+// so the one given up on was not it.
+func (a *App) forgetAbandoned(n int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.givenUpFetch[n] {
+		delete(a.givenUpFetch, n)
+		log.Printf("[agent] results: game #%d is being played again, so it is no longer abandoned", n)
+	}
+	if p := a.pendingFetch[n]; p != nil {
+		p.attempts, p.nextRetry = 0, time.Time{}
+	}
+}
+
 // noteFetchFailure records a failed results fetch: exponential per-game backoff,
 // abandoning the game after maxFetchAttempts so a stuck print-server game can't
 // be hammered on every poll forever (the #347 failure mode).
@@ -1166,8 +1259,7 @@ func (a *App) onPrintServerBack() {
 type resultsSession struct {
 	app    *App
 	manual bool
-	using  bool   // holds the connection and a printServerBusy count until retire
-	gen    uint64 // the connection the last reply came on (see acknowledge)
+	using  bool // holds the connection and a printServerBusy count until retire
 }
 
 func (a *App) newResultsSession(manual bool) *resultsSession {
@@ -1208,24 +1300,15 @@ func (s *resultsSession) retire() {
 	s.app.psLink().release()
 }
 
-// acknowledge tells O-Zone the data was received (best-effort, only with the
-// gate open, and only on the connection the last reply came on).
-func (s *resultsSession) acknowledge() {
-	if s.using && s.gen != 0 {
-		s.app.psLink().acknowledge(s.gen)
-	}
-}
-
 // list fetches the verbatim game list.
 func (s *resultsSession) list() ([]byte, error) {
 	if err := s.connect(); err != nil {
 		return nil, err
 	}
-	raw, gen, err := s.app.psLink().request(map[string]any{"command": "list"}, 0)
+	raw, err := s.app.psLink().request(map[string]any{"command": "list"}, 0)
 	if err != nil {
 		return nil, err
 	}
-	s.gen = gen
 	// A refusal is not an empty list: read as one, a backfill would report
 	// success having synced nothing.
 	if f := classifyFrame(raw); f.kind != frameList {
@@ -1240,11 +1323,10 @@ func (s *resultsSession) game(gameNumber int) ([]byte, error) {
 	if err := s.connect(); err != nil {
 		return nil, err
 	}
-	raw, gen, err := s.app.psLink().request(map[string]any{"gamenumber": gameNumber, "command": "all"}, gameNumber)
+	raw, err := s.app.psLink().request(map[string]any{"gamenumber": gameNumber, "command": "all"}, gameNumber)
 	if err != nil {
 		return nil, err
 	}
-	s.gen = gen
 	// The link takes as the reply only the whole game naming the game asked
 	// for, or a refusal (see linkWaiter.wants), so a reply for another game is
 	// not expected here; it is still checked, as every payload cached is. A
@@ -1317,11 +1399,8 @@ func (a *App) pullGameResults(gameNumber int, manual bool) error {
 	if err := json.Unmarshal(raw, &data); err != nil {
 		return err
 	}
-	if err := a.pusher.PushGameResults(gameNumber, data); err != nil {
-		return err
-	}
-	s.acknowledge()
-	return nil
+	// Not acknowledged: the agent asked for it (see printLink).
+	return a.pusher.PushGameResults(gameNumber, data)
 }
 
 // psLink returns the print-server connection, making it on first use.
@@ -1430,10 +1509,11 @@ func (a *App) processCommands() {
 		if isResultsCommand(c.Type) {
 			if gate := a.printServerGate(); gate != nil {
 				_ = a.pusher.AckCommand(c.ID, "deferred", map[string]any{"reason": gate.Error()})
-				log.Printf("[agent] commands: deferred %s #%d — %v", c.Type, c.ID, gate)
+				a.logDeferred(c, gate)
 				continue
 			}
 		}
+		delete(a.deferLogged, c.ID)
 
 		status, result := a.runCommand(c)
 		if err := a.pusher.AckCommand(c.ID, status, result); err != nil {
@@ -1880,7 +1960,9 @@ func (a *App) refreshCache(manual bool) error {
 		consecutive = 0
 		a.cacheGame(num, raw)
 	}
-	sess.acknowledge()
+	// Nothing is acknowledged: the list and every game were asked for (see
+	// printLink). Before 1.12.1 this sent {"success": true} after every
+	// refresh, once a minute between games, even when it fetched nothing.
 	return nil
 }
 

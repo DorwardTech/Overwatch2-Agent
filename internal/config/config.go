@@ -216,10 +216,17 @@ func Load() (Config, error) {
 			return c, err
 		}
 	}
-	// Central marks an agent offline after ~30s without a push; an idle poll at
-	// or above that flaps the site "offline" between pushes.
+	// Central's Agent offline alert fires, by default, after 30 seconds without
+	// a push. An idle poll at or above that (and the heartbeat sent while the
+	// game server is unreachable, which runs at the same interval) raises it
+	// between pushes. When the game server stops answering, the first
+	// heartbeat goes 2 seconds after the poll gives up, up to 10 seconds into
+	// it, so the longest quiet spell is the interval plus 12 seconds: 27 at
+	// the default 15, and past 30 from 18.
 	if c.IdlePollInterval >= 30*time.Second {
-		log.Printf("[agent] config: IDLE_POLL_INTERVAL=%s is at/above central's 30s offline window — the site will flap offline", c.IdlePollInterval)
+		log.Printf("[agent] config: IDLE_POLL_INTERVAL=%s is at/above the Agent offline alert's default of 30 seconds — the alert will fire between pushes", c.IdlePollInterval)
+	} else if c.IdlePollInterval+outageGap >= 30*time.Second {
+		log.Printf("[agent] config: IDLE_POLL_INTERVAL=%s — when the game server stops answering, up to %s can pass before the agent's first check-in, past the Agent offline alert's default of 30 seconds", c.IdlePollInterval, c.IdlePollInterval+outageGap)
 	}
 	if c.PollInterval < time.Second {
 		log.Printf("[agent] config: POLL_INTERVAL below 1s clamped to 1s")
@@ -235,6 +242,11 @@ const (
 	minPrintServerRecheck = time.Minute
 	maxPrintServerRecheck = time.Hour
 )
+
+// outageGap is how long, on top of IDLE_POLL_INTERVAL, central can go without
+// a push when the game server stops answering: the poll's 10 s reply timeout
+// and the 2 s a lost link gets to come back before the first heartbeat.
+const outageGap = 12 * time.Second
 
 // clampPrintServer keeps the print-server presence settings in range, saying
 // so when it moves one.

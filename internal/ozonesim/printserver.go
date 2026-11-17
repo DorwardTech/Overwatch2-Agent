@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"time"
 
 	"overwatch/agent/internal/ozonefix"
 	"overwatch/agent/internal/ozoneproto"
@@ -30,6 +31,8 @@ type PrintServer struct {
 	wmu       sync.Mutex           // one write at a time on any connection
 	requests  map[string]int       // command -> count
 	onRequest func(command string) // test hook, invoked per command (may be nil)
+	ackReply  []byte               // sent back to {"success":true} when set (see AnswerAcks)
+	ackDelay  time.Duration        // how long after the acknowledgement
 	closed    bool
 }
 
@@ -40,6 +43,15 @@ func (p *PrintServer) OnRequest(fn func(command string)) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.onRequest = fn
+}
+
+// AnswerAcks makes the server answer each {"success":true} with body, after
+// delay, as a game server that mistakes one for a request might. By default
+// an acknowledgement gets no reply.
+func (p *PrintServer) AnswerAcks(body []byte, delay time.Duration) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.ackReply, p.ackDelay = append([]byte(nil), body...), delay
 }
 
 // NewPrintServer seeds a coherent default: game #9 from the golden, a one-entry
@@ -233,10 +245,17 @@ func (p *PrintServer) handle(conn net.Conn) {
 
 // respond returns the framed JSON reply and whether the request is silent (ack).
 func (p *PrintServer) respond(req map[string]any) (reply []byte, silent bool) {
-	// Data-acknowledged messages get no reply.
+	// Data-acknowledged messages get no reply, unless AnswerAcks says so.
 	if _, ok := req["success"]; ok {
 		p.count("ack")
-		return nil, true
+		p.mu.Lock()
+		reply, delay := p.ackReply, p.ackDelay
+		p.mu.Unlock()
+		if reply == nil {
+			return nil, true
+		}
+		time.Sleep(delay)
+		return reply, false
 	}
 	if _, ok := req["autoprint"]; ok {
 		p.count("autoprint")

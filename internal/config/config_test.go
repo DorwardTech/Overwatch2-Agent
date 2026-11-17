@@ -1,6 +1,8 @@
 package config
 
 import (
+	"bytes"
+	"log"
 	"strings"
 	"testing"
 	"time"
@@ -239,5 +241,38 @@ func TestPrintServerPresenceSettings(t *testing.T) {
 				t.Errorf("PrintServerRecheckMax = %s, want %s", cfg.PrintServerRecheckMax, c.wantRecheck)
 			}
 		})
+	}
+}
+
+// An idle interval that, with the poll's timeout and the loss delay, lets more
+// than 30 seconds pass between pushes when the game server stops answering is
+// worth a warning: the Agent offline alert would fire for an agent that is up.
+func TestAnIdleIntervalThatOutrunsAgentOfflineIsWarnedAbout(t *testing.T) {
+	for _, tc := range []struct {
+		idle string
+		want string
+	}{
+		{"15", ""},
+		{"20", "up to 32s can pass before the agent's first check-in"},
+		{"30", "at/above the Agent offline alert's default of 30 seconds"},
+	} {
+		t.Setenv("CENTRAL_API_URL", "https://ow2.example/api/agent/ingest")
+		t.Setenv("AGENT_TOKEN", "OW2_1_abc")
+		t.Setenv("IDLE_POLL_INTERVAL", tc.idle)
+		var out bytes.Buffer
+		prev := log.Writer()
+		log.SetOutput(&out)
+		_, err := Load()
+		log.SetOutput(prev)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := out.String()
+		if tc.want == "" && strings.Contains(got, "IDLE_POLL_INTERVAL") {
+			t.Errorf("IDLE_POLL_INTERVAL=%s: warned %q", tc.idle, got)
+		}
+		if tc.want != "" && !strings.Contains(got, tc.want) {
+			t.Errorf("IDLE_POLL_INTERVAL=%s: log %q, want %q", tc.idle, got, tc.want)
+		}
 	}
 }

@@ -24,6 +24,13 @@ func New() *Health { return &Health{} }
 func (h *Health) MarkPoll() { h.lastPoll.Store(time.Now().Unix()) }
 func (h *Health) MarkPush() { h.lastPush.Store(time.Now().Unix()) }
 
+// Ready reports whether telemetry reached central within the last 30s: what
+// /readyz answers.
+func (h *Health) Ready() bool {
+	last := h.lastPush.Load()
+	return last > 0 && time.Now().Unix()-last < 30
+}
+
 // Serve starts the health HTTP server. /healthz = process alive,
 // /readyz = pushed within the last 30s.
 func (h *Health) Serve(addr string) {
@@ -33,8 +40,7 @@ func (h *Health) Serve(addr string) {
 		_, _ = w.Write([]byte("ok"))
 	})
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
-		last := h.lastPush.Load()
-		if last > 0 && time.Now().Unix()-last < 30 {
+		if h.Ready() {
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte("ready"))
 			return

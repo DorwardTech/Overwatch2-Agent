@@ -106,11 +106,6 @@ func (c *Client) Next() ([]byte, error) {
 	return ozoneproto.ReadFrame(c.conn)
 }
 
-// Acknowledge tells O-Zone the data was received.
-func (c *Client) Acknowledge(timeout time.Duration) error {
-	return c.send(map[string]any{"success": true}, timeout)
-}
-
 func (c *Client) send(cmd map[string]any, timeout time.Duration) error {
 	body, err := json.Marshal(cmd)
 	if err != nil {

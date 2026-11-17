@@ -207,9 +207,10 @@ docker compose exec agent /agent healthcheck
 ```
 
 `/healthz` answers while the process runs; that is what `healthcheck` probes.
-`/readyz` answers `200` once the agent has pushed to central in the last 30
-seconds; until then its body says why when there is a specific reason (auto
-mode still waiting for an announcement, for example).
+`/readyz` answers `200` once the agent has pushed telemetry to central in the
+last 30 seconds (a heartbeat, below, does not count); until then its body says
+why when there is a specific reason (auto mode still waiting for an
+announcement, for example).
 
 **Other programs on the game server.** O-Zone sends every client's replies to
 every connection, so while another program uses its WebSocket API the agent
@@ -223,6 +224,25 @@ many were waiting) and `unsettled_lost` (polls that lost a message mid-poll).
 Only the last one costs anything: such a poll cannot confirm the server state,
 so the print server stays off-limits until a clean poll. When it grows the log
 says so in a warning, at most every five minutes.
+
+### When the game server can't be reached
+
+Since 1.12.0 the agent keeps checking in with central while it cannot reach the
+game server's WebSocket (a connect or poll fails, or in auto mode it has not
+chosen a server yet). Every `IDLE_POLL_INTERVAL` it sends a heartbeat: a push
+with its self-report and no telemetry (no `server_state` or `packs`), so central
+shows the venue as "Game server unreachable" (central 1.60.0+) instead of the
+agent as offline. The first goes 2 s after the link is lost, unless it is back
+by then. At start it waits for the first failed connect, or twice
+`IDLE_POLL_INTERVAL` but at most 20 s; with automatic discovery, until the 11 s
+listening window has passed with no server it may choose (or 24 s if the
+listener cannot start), so a normal start reports nothing. While the
+game server is unreachable it also fetches commands every `SLOW_POLL_INTERVAL`
+(commands that need the print server still wait). Nothing extra is sent to the
+game server. The link is in every self-report as `agent.ozone_link`, and in
+`/api/overview` as `ozone_link`: `state` (`connected`, `unreachable` or
+`discovering`), `since`, `last_ok_at`, `last_error` (only while not connected)
+and `attempts` (failed tries in a row).
 
 ### The print-server connection
 
