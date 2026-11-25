@@ -6,6 +6,18 @@ first.
 
 The Site Agent and Overwatch have their own version numbers.
 
+## [1.12.2] — 2026-11-25
+
+A security update. There is nothing to set up. Docker venues pull the 1.12.2 image; Windows venues run the 1.12.2 installer.
+
+### Security
+
+- **The keys the agent's messages to the game server are sent with now come from a secure random number generator.** The connection standard the agent uses to talk to the game server scrambles each message the agent sends with a short random key. The part of the agent that runs that connection made those keys with an ordinary random number generator, which can be easier to predict. Nothing else about the connection changes.
+
+### Notes
+
+- The risk was low: the key only matters if something sits between the agent and the game server, and the agent talks to the game server directly on the venue's network.
+
 ## [1.12.1] — 2026-11-17
 
 Two fixes to how the agent works with the game server's print server. There is nothing to set up. Docker venues pull the 1.12.1 image; Windows venues run the 1.12.1 installer.

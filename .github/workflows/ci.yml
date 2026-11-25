@@ -108,6 +108,14 @@ jobs:
           go install golang.org/x/vuln/cmd/govulncheck@latest
           govulncheck ./...
 
+      # The agent uses a patched copy of gorilla/websocket through a replace,
+      # which hides that module from the govulncheck run above. This checks the
+      # copy is v1.5.3 plus its recorded patch, re-runs govulncheck with the
+      # replace removed (only the advisory the patch fixes may show), and warns
+      # when upstream has tagged a newer release.
+      - name: Patched gorilla/websocket
+        run: third_party/websocket/audit.sh .
+
   image:
     name: Build image
     runs-on: ubuntu-latest
