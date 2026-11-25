@@ -8,10 +8,14 @@ FROM --platform=$BUILDPLATFORM golang:1.26.11-alpine AS build
 # Default to the current release so an un-tagged build (e.g. main -> :latest)
 # still reports a real version, not "dev". Tagged releases override this via a
 # build-arg (see docker-image.yml). Keep in sync with internal/version.Value.
-ARG AGENT_VERSION=1.12.1
+ARG AGENT_VERSION=1.12.2
 ARG TARGETOS TARGETARCH TARGETVARIANT
 WORKDIR /src
 COPY go.mod go.sum ./
+# The agent builds against a patched copy of gorilla/websocket
+# (third_party/websocket, used through a replace in go.mod), so it has to be
+# here before `go mod download` can resolve the module list.
+COPY third_party ./third_party
 RUN go mod download
 COPY . .
 # GOARM is derived from the buildx variant (arm/v7 -> 7); ignored for non-ARM.

@@ -12,3 +12,5 @@ require (
 )
 
 require filippo.io/edwards25519 v1.1.1 // indirect
+
+replace github.com/gorilla/websocket => ./third_party/websocket
